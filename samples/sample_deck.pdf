@@ -1,0 +1,113 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 343 >>
+stream
+BT /F2 22 Tf 60 525 Td (Process Transformation Programme) Tj ET
+BT /F2 14 Tf 60 485 Td (Goals for the current fiscal year) Tj ET
+BT /F1 12 Tf 70 455 Td (- Reduce manual effort across the back office) Tj ET
+BT /F1 12 Tf 70 433 Td (- Improve data quality and turnaround time) Tj ET
+BT /F1 12 Tf 70 411 Td (- Establish real-time reporting) Tj ET
+
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 823 >>
+stream
+BT /F2 20 Tf 60 535 Td (Current vs Target State) Tj ET
+BT /F1 12 Tf 60 505 Td (The left column is today; the right is the target.) Tj ET
+1 w
+60 475 m 60 339 l S
+360 475 m 360 339 l S
+60 475 m 360 475 l S
+60 441 m 360 441 l S
+60 407 m 360 407 l S
+60 373 m 360 373 l S
+60 339 m 360 339 l S
+BT /F1 11 Tf 64 452.9 Td (As-Is) Tj ET
+BT /F1 11 Tf 64 418.9 Td (Manual data entry) Tj ET
+BT /F1 11 Tf 64 384.9 Td (Paper-based forms) Tj ET
+BT /F1 11 Tf 64 350.9 Td (Weekly close) Tj ET
+1 w
+400 475 m 400 339 l S
+720 475 m 720 339 l S
+400 475 m 720 475 l S
+400 441 m 720 441 l S
+400 407 m 720 407 l S
+400 373 m 720 373 l S
+400 339 m 720 339 l S
+BT /F1 11 Tf 404 452.9 Td (To-Be) Tj ET
+BT /F1 11 Tf 404 418.9 Td (Automated capture) Tj ET
+BT /F1 11 Tf 404 384.9 Td (Digital forms) Tj ET
+BT /F1 11 Tf 404 350.9 Td (Real-time close) Tj ET
+
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 10 0 R >>
+endobj
+10 0 obj
+<< /Length 733 >>
+stream
+BT /F2 20 Tf 60 535 Td (Milestones) Tj ET
+1 w
+60 495 m 60 359 l S
+260 495 m 260 359 l S
+520 495 m 520 359 l S
+780 495 m 780 359 l S
+60 495 m 780 495 l S
+60 461 m 780 461 l S
+60 427 m 780 427 l S
+60 393 m 780 393 l S
+60 359 m 780 359 l S
+BT /F1 11 Tf 64 472.9 Td (Phase) Tj ET
+BT /F1 11 Tf 264 472.9 Td (Owner) Tj ET
+BT /F1 11 Tf 524 472.9 Td (Target date) Tj ET
+BT /F1 11 Tf 64 438.9 Td (Discovery) Tj ET
+BT /F1 11 Tf 264 438.9 Td (Operations) Tj ET
+BT /F1 11 Tf 524 438.9 Td (Q1) Tj ET
+BT /F1 11 Tf 64 404.9 Td (Build) Tj ET
+BT /F1 11 Tf 264 404.9 Td (Engineering) Tj ET
+BT /F1 11 Tf 524 404.9 Td (Q2) Tj ET
+BT /F1 11 Tf 64 370.9 Td (Rollout) Tj ET
+BT /F1 11 Tf 264 370.9 Td (Change team) Tj ET
+BT /F1 11 Tf 524 370.9 Td (Q3) Tj ET
+
+endstream
+endobj
+xref
+0 11
+0000000000 65535 f
+0000000015 00000 n
+0000000064 00000 n
+0000000133 00000 n
+0000000203 00000 n
+0000000278 00000 n
+0000000414 00000 n
+0000000808 00000 n
+0000000944 00000 n
+0000001818 00000 n
+0000001955 00000 n
+trailer
+<< /Size 11 /Root 1 0 R >>
+startxref
+2740
+%%EOF

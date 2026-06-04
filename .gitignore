@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# pdf2excel outputs
+*.xlsx
+pdf2excel_*/
+
+# Keep sample PDFs but ignore generated spreadsheets in samples/
+samples/*.xlsx
+
+# ...but DO keep the bundled Standard Assessment template (a committed asset)
+!templates/Standard.xlsx

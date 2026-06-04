@@ -1,0 +1,13 @@
+# Core (PDF + Excel)
+pdfplumber>=0.11.0
+openpyxl>=3.1.0
+
+# Web URL extraction (widens the footprint beyond the core two above)
+trafilatura>=1.8
+beautifulsoup4>=4.12
+lxml>=5.0
+requests>=2.31
+certifi>=2024.2          # up-to-date CA bundle (default TLS verification)
+truststore>=0.9          # use the OS trust store (Python 3.10+; skipped on 3.9)
+playwright>=1.40         # headless render for JS pages; lazy-imported.
+                         # one-time: `playwright install chromium`
