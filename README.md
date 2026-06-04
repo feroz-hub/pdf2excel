@@ -20,6 +20,11 @@ Either source can be exported in **two output formats**:
   `templates/Standard.xlsx` so the result drops straight into an existing
   assessment workflow (see below).
 
+Optionally, an **AI enrichment** pass then fills the assessment's analyst columns
+**E–I** — classifying each clause as *Requirement* or *Information* and, for
+requirements, drafting the organisation-perspective requirement — using **Claude,
+OpenAI, or Gemini**. See *AI enrichment* below.
+
 > Works on PDFs that contain real text (selectable in a viewer). It does **not**
 > OCR scanned/image-only PDFs.
 
@@ -200,6 +205,115 @@ Flags: `--format {default,standard}`, `--standard-id`, `--standard-title`,
 > original sample; for a new standard the analyst re-applies them. The
 > full-range `E`/`I` dropdowns survive because rows are cleared, not deleted.
 
+## AI enrichment (columns E–I) — `ai_enrich.py` / `ai_providers.py`
+
+A second, optional phase. After extraction has produced the Standard Assessment
+rows (columns A–E), an LLM reads each clause and fills the analyst columns:
+
+| col | header | filled by the model |
+|-----|--------|---------------------|
+| E | Classification | `Requirement` or `Information` (overrides the keyword heuristic; the keyword rule is the fallback if a row can't be parsed) |
+| F | Requirement | the organisation-perspective requirement in *Standard Format* ("The organization shall …"), Direct or Derived from the text |
+| G | Detailed Description | `REQ-NNN \| Verification: <method> \| <Direct/Derived> — <trace>` followed by a plain-language description of what complying entails |
+| H | Change in Requirement | the concrete change/action the organisation must implement to comply |
+| I | Requirement Classification | one of a configurable controlled vocabulary (default `Product` / `Process` / `Other`) that feeds the template's NIST cascade |
+
+For a clause classified **Information**, columns F–I are left **blank** (toggle
+with `fill_only_requirements`). Requirement IDs are renumbered into one
+continuous `REQ-001, REQ-002, …` sequence across the whole document.
+
+The prompt for E+F is the supplied compliance-analyst prompt; the instructions
+for G, H and I are editable defaults (see `DEFAULT_PROMPTS` in `ai_enrich.py`, or
+the prompt editors in the GUI). One **consolidated structured-JSON call per
+batch** of clauses keeps E–I mutually consistent and costs far less than a call
+per column; output is parsed defensively (a JSON-repair retry, then a per-row
+keyword fallback), and batches run concurrently.
+
+### Providers, models & keys
+
+| provider | flag value | default model | API key (env var or saved config) |
+|----------|------------|---------------|-----------------------------------|
+| Claude (Anthropic) | `claude` | `claude-opus-4-8` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
+| Gemini (Google) | `gemini` | `gemini-2.0-flash` | `GOOGLE_API_KEY` |
+| Ollama (local) | `ollama` | `gemma4` | none — local server (`OLLAMA_HOST`, default `localhost:11434`) |
+
+Keys resolve **saved config → environment variable**. The GUI saves them (and
+your model/prompt/option choices) to `~/.pdf2excel.json` (gitignored, `0600`).
+SDKs are **lazily imported** — install only the provider(s) you use
+(`pip install anthropic` / `openai` / `google-generativeai` / `ollama`). For
+Claude the large instruction prompt is sent with prompt caching, JSON is enforced
+via structured outputs, and `temperature` is dropped for Opus 4.7/4.8 (which
+reject it). **Ollama** runs models locally — **no key, no cost, no rate limits**:
+start the Ollama server, `ollama pull <model>`, choose *Ollama (local)* and click
+**List models** to pick one you've pulled (optionally set a host in the field).
+It's the ideal way to test the whole flow for free.
+
+> **Local-model resources.** Local models are memory-heavy: if Ollama is killed
+> mid-run (exit code 137 / out of memory), switch to a smaller model
+> (e.g. `gemma3`, `llama3.2`, `qwen2.5:3b`), keep **Workers = 1** and a small
+> **Batch size**, and validate with **Rows = First N** before enriching a large
+> document. Big documents (thousands of clauses) on a laptop are slow — prefer a
+> hosted provider, or a small local model, for the full run.
+
+Model availability changes over time (e.g. Google retired the Gemini 1.5
+models). The model field is editable, and the GUI's **List models** button
+queries the provider's API for the exact models your key can use — click it and
+pick one if a default model returns a *not found / not supported* error.
+
+### CLI
+
+```bash
+# Dry-run (no API calls, no cost) — exercises the whole pipeline with placeholders:
+python router.py samples/sample_law.pdf --format standard --ai-fill --ai-dry-run -o out.xlsx
+
+# Real run with Claude (needs ANTHROPIC_API_KEY):
+python router.py law.pdf --format standard --standard-id MLSR221 \
+    --ai-fill --ai-provider claude --ai-model claude-opus-4-8 -o out.xlsx
+
+# OpenAI, smaller batches:
+python router.py law.pdf --format standard --ai-fill \
+    --ai-provider openai --ai-model gpt-4o-mini --ai-batch-size 8 -o out.xlsx
+```
+
+Flags: `--ai-fill` (requires `--format standard`), `--ai-provider`, `--ai-model`,
+`--ai-batch-size`, `--ai-workers`, `--ai-temperature`, `--ai-dry-run`.
+
+As a library:
+
+```python
+from router import convert
+from ai_enrich import EnrichConfig
+
+cfg = EnrichConfig(provider="claude", model="claude-opus-4-8", batch_size=12)
+result = convert("law.pdf", "out.xlsx", fmt="standard",
+                 standard_id="MLSR221", enrich_config=cfg)
+print(result.n_requirements, "requirements /", result.n_items, "rows")
+```
+
+### Rate limits & quota (429)
+
+API calls are rate-limited. On a `429` the run **retries with backoff** (honouring
+the server's `retry-after`) up to **Retries** times (default 5), so transient
+per-minute limits clear on their own. If the quota genuinely can't be satisfied
+(e.g. a free-tier `limit: 0` for the chosen model), the run stops with an
+actionable message. Remedies:
+
+- **Lower throughput** — set **Workers** to 1 and reduce **Batch size** to stay
+  under per-minute limits.
+- **Pick a model with quota** — click **List models**; free-tier quota varies by
+  model/region (Gemini's free tier may grant `0` for some models).
+- **Enable billing** on the provider account, or **switch provider**.
+- **Dry-run** needs no quota — use it to validate the pipeline first.
+
+### Responsible use
+
+Only the extracted clause text (plus the standard's metadata) is sent to the
+chosen provider — no other document or system data. Keys are stored locally and
+gitignored. The model is instructed to stay faithful to the source and **not**
+invent obligations, thresholds, or scope the text does not support; a `dry-run`
+mode and a pre-run **cost estimate** let you validate the flow before spending.
+
 ## Web pages (URLs) — `web_extract.py`
 
 Give the router a URL instead of a file path and it sniffs the content by magic
@@ -292,18 +406,31 @@ python router.py "<url>" --insecure -o out.xlsx        # trusted sources only
 
 ## Desktop GUI — `pdf_to_excel_gui.py`
 
-A thin Tkinter shell over `router.convert` (no extraction logic of its own):
+A thin Tkinter shell over `router.convert` + `ai_enrich.enrich` (no extraction or
+AI logic of its own), organised as a three-tab workflow:
 
-- **PDF file or URL** input — a local path or a URL (PDF or HTML page).
-- **Render JavaScript** dropdown (Auto / Always / Never) and an **Allow insecure
-  TLS** checkbox for URL fetches.
-- **Mode** dropdown: Auto / Prose / Tables.
-- **Output format** dropdown: Default / Standard Assessment, plus a **Standard
-  ID** field used when the standard format is selected.
-- **Gap factor** slider (prose only).
-- Runs on a background thread; previews the result in a table — paragraph rows
-  for prose, or a per-sheet `sheet | rows | cols` summary for tables. The Excel
-  file the router produced is saved to the chosen output path.
+1. **Input & Extract** — PDF file or URL, output path, **Mode** (Auto/Prose/Tables),
+   **Output format** (Default / Standard Assessment), Standard ID/Title, gap-factor
+   slider, **Render JavaScript** and **Allow insecure TLS** for URL fetches. *Extract
+   → Preview* runs phase 1 on a background thread and lists the extracted clauses.
+2. **AI Configuration** — **Provider** (Claude / OpenAI / Gemini) and **Model**
+   dropdowns, a masked **API key** field (saved to `~/.pdf2excel.json`), batch size /
+   workers / max-tokens / temperature, toggles (**Dry-run**, *fill F–I only for
+   Requirements*, *use cache*), the **column-I vocabulary**, a fully **editable
+   prompt per column**, and an **Estimate cost** button.
+3. **Run & Results** — *Generate with AI* runs the enrichment (progress bar + live
+   log), shows the E–I results in a grid you can **double-click to edit**, then
+   *Export to Excel* writes the finished workbook. The **Rows** selector
+   (All / Selected / First N) enriches every clause, only the rows you multi-select
+   in the grid, or just the first N — handy for cheap **test runs**; partial results
+   merge back into the sheet and requirement ids stay continuous.
+
+Everything runs on background threads, so the window stays responsive.
+
+> **macOS Tk:** the app silences Apple's *"system Tk 8.5 is deprecated"* warning
+> automatically. For a current, non-deprecated **Tk 8.6**, run from a Python built
+> against Tcl/Tk 8.6 — e.g. a conda environment (conda's Python bundles Tk 8.6) or
+> the python.org installer — rather than the macOS system Python.
 
 ```bash
 python pdf_to_excel_gui.py
@@ -343,15 +470,18 @@ python samples/make_samples.py
 ```text
 pdf2excel/
 ├── README.md
-├── requirements.txt              # pdfplumber, openpyxl
+├── requirements.txt              # core: pdfplumber, openpyxl (+ optional web/AI)
 ├── .gitignore
 ├── pdf_paragraphs_to_excel.py    # prose engine + CLI
 ├── deck_tables_to_excel.py       # slide-deck / table extractor + CLI
 ├── web_extract.py                # URL -> main content -> Paragraph objects
 ├── standard_export.py            # Standard Assessment writer + mapping layer
-├── router.py                     # auto-routing (file/URL) + format + CLI
+├── ai_providers.py               # LLM provider abstraction (Claude/OpenAI/Gemini)
+├── ai_enrich.py                  # AI enrichment: items -> cols E–I (+ prompts)
+├── config.py                     # local settings/keys persistence (~/.pdf2excel.json)
+├── router.py                     # auto-routing (file/URL) + format + AI + CLI
 ├── download_and_extract.py       # fetch()/detect() + download-by-URL CLI
-├── pdf_to_excel_gui.py           # Tkinter GUI over the router
+├── pdf_to_excel_gui.py           # 3-tab Tkinter GUI (extract → AI → export)
 ├── templates/
 │   └── Standard.xlsx             # bundled Standard Assessment template
 └── samples/

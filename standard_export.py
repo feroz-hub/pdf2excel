@@ -210,7 +210,13 @@ def write_standard_assessment(
             3: item.get("title", ""),
             4: item.get("text", ""),
             5: item.get("classification", "Information") or "Information",
-            # F..Q intentionally left empty for the analyst (dropdowns remain).
+            # F–I: AI-enrichment output (ai_enrich). Absent keys write "", so
+            # non-enriched items behave exactly as before (F–I left blank).
+            6: item.get("requirement", "") or "",
+            7: item.get("detailed_description", "") or "",
+            8: item.get("change_in_requirement", "") or "",
+            9: item.get("requirement_classification", "") or "",
+            # J..Q intentionally left empty for the analyst (dropdowns remain).
         }
         for c, v in values.items():
             cell = ws.cell(row=row, column=c)

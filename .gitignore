@@ -26,3 +26,8 @@ samples/*.xlsx
 
 # ...but DO keep the bundled Standard Assessment template (a committed asset)
 !templates/Standard.xlsx
+
+# AI enrichment: local settings (may contain API keys) and the response cache.
+# NEVER commit these.
+.pdf2excel.json
+.pdf2excel_cache.json

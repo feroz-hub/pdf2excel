@@ -8,6 +8,14 @@ beautifulsoup4>=4.12
 lxml>=5.0
 requests>=2.31
 certifi>=2024.2          # up-to-date CA bundle (default TLS verification)
-truststore>=0.9          # use the OS trust store (Python 3.10+; skipped on 3.9)
+truststore>=0.9; python_version >= "3.10"   # OS trust store (3.10+; skipped on 3.9)
 playwright>=1.40         # headless render for JS pages; lazy-imported.
                          # one-time: `playwright install chromium`
+
+# AI enrichment (fills Standard Assessment columns E–I). All lazy-imported, so
+# non-AI use never needs them; install only the provider(s) you actually use.
+anthropic>=0.40          # Claude  (default provider; needs ANTHROPIC_API_KEY)
+openai>=1.40             # OpenAI  (needs OPENAI_API_KEY)
+google-generativeai>=0.8 # Gemini  (needs GOOGLE_API_KEY)
+ollama>=0.3              # Ollama  (local models — no key/cost; run the Ollama
+                         # server, then `ollama pull <model>`)
