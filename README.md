@@ -32,7 +32,16 @@ OpenAI, or Gemini**. See *AI enrichment* below.
 
 Requires **Python 3.9+**.
 
+It is recommended (and often required on modern Linux distributions) to install the dependencies inside a virtual environment:
+
 ```bash
+# Create a virtual environment
+python3 -m venv venv
+
+# Activate it
+source venv/bin/activate  # On Windows use: venv\Scripts\activate
+
+# Install requirements
 pip install -r requirements.txt
 ```
 
