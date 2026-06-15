@@ -153,6 +153,77 @@ def deck_to_items(pages_tables, slides_text) -> List[dict]:
     return items
 
 
+def blocks_to_items(blocks: List[dict], classify_requirements: bool = True) -> List[dict]:
+    """Convert extracted blocks into Standard Assessment rows.
+
+    Headings update current clause id and title; body paragraphs/notes/table rows
+    become individual rows; TOC blocks are skipped by default.
+    """
+    items: List[dict] = []
+    cur_id, cur_title = "", ""
+    for b in blocks:
+        b_type = b.get("block_type", "paragraph")
+        
+        if b_type == "heading":
+            cur_id, cur_title = split_heading(b["text"])
+            continue
+            
+        if b_type == "toc":
+            continue
+            
+        if b_type == "table":
+            rows = b.get("rows")
+            if rows:
+                for row in rows:
+                    items.append({
+                        "page": b.get("page"),
+                        "clause_id": cur_id,
+                        "title": cur_title,
+                        "text": " | ".join(str(c or "").strip() for c in row),
+                        "classification": "Information",
+                        "confidence": b.get("confidence", 0.9),
+                        "issues": list(b.get("issues", [])),
+                        "bbox": b.get("bbox")
+                    })
+            else:
+                for row_text in b["text"].splitlines():
+                    if row_text.strip():
+                        items.append({
+                            "page": b.get("page"),
+                            "clause_id": cur_id,
+                            "title": cur_title,
+                            "text": row_text.strip(),
+                            "classification": "Information",
+                            "confidence": b.get("confidence", 0.9),
+                            "issues": list(b.get("issues", [])),
+                            "bbox": b.get("bbox")
+                        })
+        elif b_type == "note":
+            items.append({
+                "page": b.get("page"),
+                "clause_id": cur_id,
+                "title": cur_title,
+                "text": b["text"],
+                "classification": "Information",
+                "confidence": b.get("confidence", 1.0),
+                "issues": list(b.get("issues", [])),
+                "bbox": b.get("bbox")
+            })
+        else:  # paragraph, unknown
+            classification = _classify(b["text"], classify_requirements)
+            items.append({
+                "page": b.get("page"),
+                "clause_id": cur_id,
+                "title": cur_title,
+                "text": b["text"],
+                "classification": classification,
+                "confidence": b.get("confidence", 1.0),
+                "issues": list(b.get("issues", [])),
+                "bbox": b.get("bbox")
+            })
+    return items
+
+
 # --------------------------------------------------------------------------- #
 # Writer
 # --------------------------------------------------------------------------- #
@@ -170,7 +241,8 @@ def write_standard_assessment(
 ) -> None:
     """Populate the Standard Assessment template and save it to ``out_path``."""
     from openpyxl import load_workbook
-    from openpyxl.styles import Alignment, Font
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     if not os.path.isfile(template_path):
         raise FileNotFoundError(f"template not found: {template_path}")
@@ -224,5 +296,53 @@ def write_standard_assessment(
             cell.font = font
             cell.alignment = align
         prev_clause = clause
+
+    # Write Extraction_Issues sheet if any issues exist
+    has_issues = any(it.get("issues") for it in items)
+    if has_issues:
+        if "Extraction_Issues" in wb.sheetnames:
+            ws_issues = wb["Extraction_Issues"]
+            # clear sheet
+            ws_issues.delete_rows(1, ws_issues.max_row)
+        else:
+            ws_issues = wb.create_sheet(title="Extraction_Issues")
+            
+        headers = ["Row", "Page", "Clause ID", "Title", "Text", "Confidence", "Issues"]
+        ws_issues.append(headers)
+        
+        header_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        header_fill = PatternFill("solid", fgColor="C00000")
+        body_font = Font(name="Arial", size=10)
+        wrap_align = Alignment(wrap_text=True, vertical="top")
+        top_align = Alignment(vertical="top")
+        
+        for col_idx, h in enumerate(headers, start=1):
+            cell = ws_issues.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+        for i, item in enumerate(items, start=1):
+            issues = item.get("issues", [])
+            if issues:
+                row_num = DATA_START_ROW + i - 1
+                ws_issues.append([
+                    row_num,
+                    item.get("page", ""),
+                    item.get("clause_id", ""),
+                    item.get("title", ""),
+                    item.get("text", ""),
+                    item.get("confidence", 1.0),
+                    ", ".join(issues)
+                ])
+                r_idx = ws_issues.max_row
+                for col_idx in range(1, len(headers) + 1):
+                    cell = ws_issues.cell(row=r_idx, column=col_idx)
+                    cell.font = body_font
+                    cell.alignment = wrap_align if col_idx in (4, 5) else top_align
+                    
+        widths = {1: 8, 2: 8, 3: 12, 4: 20, 5: 50, 6: 12, 7: 30}
+        for col_idx, w in widths.items():
+            ws_issues.column_dimensions[get_column_letter(col_idx)].width = w
 
     wb.save(out_path)

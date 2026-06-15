@@ -395,7 +395,7 @@ def extract_paragraphs(
         lines = _strip_boilerplate(raw_lines, boilerplate)
         page_paras = _group_page_paragraphs(lines, gap_factor, heading_spec)
 
-        for kind, text in page_paras:
+        for para_pos, (kind, text) in enumerate(page_paras):
             text = _clean_text(text)
             if not text:
                 continue
@@ -411,7 +411,7 @@ def extract_paragraphs(
                 and paragraphs
                 and paragraphs[-1].type == "body"
                 and paragraphs[-1].page != page_index
-                and page_paras.index((kind, text)) == 0
+                and para_pos == 0
                 and not _SENTENCE_END_RE.search(paragraphs[-1].text)
                 and text[:1].islower()
             ):

@@ -70,33 +70,75 @@ python router.py "https://example.org/statute" --format standard \
 python pdf_to_excel_gui.py
 ```
 
-## The router (auto mode)
+## The router and hybrid pipeline (auto mode)
 
-`router.py` inspects the first few pages and classifies the document:
+`router.py` routes the document based on the selected mode:
+- **`auto` (default)** — auto-detects the document type and selects the best extraction strategy. **NIST SP 800-53 Rev. 5** PDFs are automatically detected and routed to the dedicated NIST extractor. Other PDFs go through the Hybrid Page-by-Page Extraction Pipeline.
+- **`prose`** — forces the paragraph-based prose extraction mode for the whole document.
+- **`tables`** — forces the slide-deck / table extraction mode for the whole document.
+- **`nist80053`** — forces the dedicated NIST SP 800-53 Rev. 5 extractor (one row per base control or control enhancement).
 
-- **landscape fraction** — share of pages wider than they are tall.
-- **table-page fraction** — share of pages with at least one real table.
+### NIST SP 800-53 Rev. 5 — `nist80053_extractor.py`
 
-It returns **tables** if more than half the sampled pages are landscape *or* at
-least half contain a real table; otherwise **prose**. Decks are landscape and/or
-table-heavy; documents are portrait prose.
+A dedicated extractor for the NIST SP 800-53 Rev. 5 control catalog. The correct
+extraction unit is **one base control or one control enhancement = one Standard
+Assessment row**, not paragraphs or visual line fragments.
+
+**Auto-detection**: When `mode="auto"`, the router checks the first few pages
+for `"NIST SP 800-53"` and `"Revision 5"` / `"Rev. 5"` markers. If found, the
+NIST extractor runs automatically.
+
+**What it does**:
+- Identifies the Chapter Three control catalog boundaries (skips cover, TOC,
+  chapters 1–2, errata, references, appendices).
+- Filters out rotated side-margin text (`upright=False`, DOI boilerplate at x0 < 45).
+- Removes page headers, footers, and underline separator lines.
+- Detects base control headings (e.g. `AC-1 POLICY AND PROCEDURES`) via bold
+  Calibri font + regex.
+- Detects control enhancements (e.g. `(1) AUTOMATED SYSTEM ACCOUNT MANAGEMENT`)
+  and assigns compound IDs like `AC-2(1)`.
+- Classifies withdrawn controls (`[Withdrawn: ...]`) as `Information`; all active
+  controls and enhancements as `Requirement`.
+- Runs validation checks: duplicate IDs, missing fields, DOI/TOC contamination.
+
+**Expected output for NIST 800-53 Rev. 5**:
+- ~1,100 rows (946 requirements + ~176 withdrawn/information items)
+- Zero one-letter or broken-fragment rows
+- Zero DOI or TOC rows
+- Every row has a valid `XX-NN` or `XX-NN(M)` clause ID
 
 ```bash
-python router.py input.pdf -o out.xlsx --mode auto      # auto (default)
-python router.py input.pdf -o out.xlsx --mode prose     # force prose
-python router.py input.pdf -o out.xlsx --mode tables    # force tables
-python router.py input.pdf --mode prose --heading-style legal
+# Auto-detect NIST 800-53 (recommended):
+python router.py NIST.SP.800-53r5.pdf \
+  --format standard \
+  --standard-id NIST80053R5 \
+  -o NIST.SP.800-53r5_fixed.xlsx
+
+# Explicit NIST mode with full metadata and review output:
+python router.py NIST.SP.800-53r5.pdf \
+  --mode nist80053 \
+  --format standard \
+  --standard-id NIST80053R5 \
+  --standard-title "NIST SP 800-53 Rev. 5 Security and Privacy Controls" \
+  --document-name "NIST SP 800-53 Revision 5" \
+  --review-output nist_review.xlsx \
+  -o NIST.SP.800-53r5_fixed.xlsx
 ```
 
-As a library:
+### Hybrid Extraction Options
+When using `mode="auto"`, you can fine-tune extraction with these new CLI options:
+- `--review-output PATH` — path to write an intermediate block-level review Excel sheet.
+- `--include-toc` — include table of contents pages (skipped by default).
+- `--no-skip-cover` — do not skip cover pages (the first page is skipped by default if word count < 300).
+- `--ocr-mode {off,detect}` — set to `detect` to enable Tesseract OCR on scanned/image-only pages.
+- `--min-confidence THRESHOLD` — filter out rows with confidence below the threshold (e.g. `0.5`).
+- `--show-issues` — print warning codes for rows with post-extraction validation issues in CLI.
 
-```python
-from router import detect_kind, convert
-
-print(detect_kind("input.pdf"))          # "prose" | "tables"
-result = convert("input.pdf", "out.xlsx", mode="auto")
-print(result.mode, result.out_path)
-```
+### Pipeline Architecture
+The hybrid pipeline consists of:
+1. **Preflight (`preflight.py`)**: Checks page geometry/orientation, table layout presence, character counts, multi-column gutter spacing, and scanned-page status.
+2. **Block Extraction (`extract_blocks.py`)**: Visual sorting of layout columns, title/heading identification, and table extraction. Can write a color-coded review workbook.
+3. **Validation (`validate_extraction.py`)**: Runs post-extraction rule validation on output items, checking for duplicates, naked page numbers, empty fields, TOC dot leaders, or broken clause numbering order, assigning confidence scores and issues list to each item.
 
 ## Prose mode — `pdf_paragraphs_to_excel.py`
 
@@ -483,12 +525,15 @@ pdf2excel/
 ├── .gitignore
 ├── pdf_paragraphs_to_excel.py    # prose engine + CLI
 ├── deck_tables_to_excel.py       # slide-deck / table extractor + CLI
+├── preflight.py                  # page preflight and column/scanned detection
+├── extract_blocks.py             # visual column-aware block extraction & sorting
+├── validate_extraction.py        # post-extraction rules and confidence validation
 ├── web_extract.py                # URL -> main content -> Paragraph objects
 ├── standard_export.py            # Standard Assessment writer + mapping layer
 ├── ai_providers.py               # LLM provider abstraction (Claude/OpenAI/Gemini)
 ├── ai_enrich.py                  # AI enrichment: items -> cols E–I (+ prompts)
 ├── config.py                     # local settings/keys persistence (~/.pdf2excel.json)
-├── router.py                     # auto-routing (file/URL) + format + AI + CLI
+├── router.py                     # hybrid-routing (file/URL) + format + AI + CLI
 ├── download_and_extract.py       # fetch()/detect() + download-by-URL CLI
 ├── pdf_to_excel_gui.py           # 3-tab Tkinter GUI (extract → AI → export)
 ├── templates/

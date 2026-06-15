@@ -49,7 +49,7 @@ from standard_export import write_standard_assessment
 from web_extract import clean_url
 
 _PREVIEW_LIMIT = 500
-_MODE_LABELS = {"Auto": "auto", "Prose": "prose", "Tables": "tables"}
+_MODE_LABELS = {"Auto": "auto", "Prose": "prose", "Tables": "tables", "NIST 800-53": "nist80053"}
 _FORMAT_LABELS = {"Default": "default", "Standard Assessment": "standard"}
 _RENDER_LABELS = {"Auto": "auto", "Always": "always", "Never": "never"}
 _PROVIDER_LABELS = {"Claude (Anthropic)": "claude", "OpenAI": "openai",
@@ -115,7 +115,7 @@ class App(tk.Tk):
     def _build_extract_tab(self, frm: ttk.Frame) -> None:
         pad = {"padx": 6, "pady": 4}
         frm.columnconfigure(1, weight=1)
-        frm.rowconfigure(7, weight=1)
+        frm.rowconfigure(8, weight=1)
 
         ttk.Label(frm, text="PDF file or URL:").grid(row=0, column=0, sticky="w", **pad)
         self.pdf_var = tk.StringVar()
@@ -163,10 +163,31 @@ class App(tk.Tk):
                      state="readonly", width=8).pack(side="left", padx=4)
         self.insecure_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(tune, text="Allow insecure TLS",
-                        variable=self.insecure_var).pack(side="left", padx=(12, 0))
+                        variable=self.insecure_var).pack(side="left", padx=(12, 18))
+        
+        ttk.Label(tune, text="OCR:").pack(side="left")
+        self.ocr_var = tk.StringVar(value="off")
+        ttk.Combobox(tune, textvariable=self.ocr_var, values=["off", "detect"],
+                     state="readonly", width=7).pack(side="left", padx=4)
+
+        adv = ttk.Frame(frm)
+        adv.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        self.skip_cover_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(adv, text="Skip Cover", variable=self.skip_cover_var).pack(side="left", padx=(0, 12))
+        self.include_toc_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(adv, text="Include TOC", variable=self.include_toc_var).pack(side="left", padx=12)
+        
+        ttk.Label(adv, text="Min confidence:").pack(side="left", padx=(12, 4))
+        self.min_conf_var = tk.DoubleVar(value=0.0)
+        ttk.Entry(adv, textvariable=self.min_conf_var, width=5).pack(side="left", padx=(0, 18))
+        
+        ttk.Label(adv, text="Review sheet:").pack(side="left")
+        self.review_var = tk.StringVar()
+        ttk.Entry(adv, textvariable=self.review_var, width=24).pack(side="left", padx=4)
+        ttk.Button(adv, text="Browse…", command=self._browse_review).pack(side="left", padx=4)
 
         act = ttk.Frame(frm)
-        act.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        act.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
         self.extract_btn = ttk.Button(act, text="① Extract → Preview",
                                       command=self._on_extract)
         self.extract_btn.pack(side="left")
@@ -175,10 +196,10 @@ class App(tk.Tk):
 
         self.extract_status = ttk.Label(frm, text="Choose a PDF/URL and click Extract.",
                                         foreground="#444")
-        self.extract_status.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
+        self.extract_status.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
 
         prev = ttk.Frame(frm)
-        prev.grid(row=7, column=0, columnspan=3, sticky="nsew", **pad)
+        prev.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
         prev.rowconfigure(0, weight=1)
         prev.columnconfigure(0, weight=1)
         cols = ("clause", "title", "text", "class")
@@ -344,6 +365,8 @@ class App(tk.Tk):
         ys = ttk.Scrollbar(res, orient="vertical", command=self.result_tree.yview)
         ys.grid(row=0, column=1, sticky="ns")
         self.result_tree.configure(yscrollcommand=ys.set)
+        self.result_tree.tag_configure("warning", background="#ffebeb")
+        self.result_tree.tag_configure("low_conf", background="#fffde6")
         self.result_tree.bind("<Double-1>", self._on_result_edit)
         ttk.Label(frm, text="Double-click an E–I cell to edit. For Rows = Selected, "
                   "multi-select rows in this grid before Generate.",
@@ -481,6 +504,13 @@ class App(tk.Tk):
         if path:
             self.out_var.set(path)
 
+    def _browse_review(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save Review sheet as", defaultextension=".xlsx",
+            filetypes=[("Excel workbook", "*.xlsx")])
+        if path:
+            self.review_var.set(path)
+
     # ===================================================================== #
     # Phase 1: extract  (background thread)
     # ===================================================================== #
@@ -511,6 +541,11 @@ class App(tk.Tk):
             standard_title=self.std_title_var.get().strip(),
             insecure=bool(self.insecure_var.get()),
             render=_RENDER_LABELS.get(self.render_var.get(), "auto"),
+            ocr_mode=self.ocr_var.get(),
+            min_confidence=float(self.min_conf_var.get() or 0.0),
+            review_output=self.review_var.get().strip() or None,
+            include_toc=bool(self.include_toc_var.get()),
+            skip_cover=bool(self.skip_cover_var.get()),
         )
         self.extract_btn.config(state="disabled")
         self.extract_prog.start(12)
@@ -703,6 +738,17 @@ class App(tk.Tk):
         self._meta = dict(result.meta)
         self._enriched = [dict(it) for it in self._items]   # working copy to merge into
         self.extract_tree.delete(*self.extract_tree.get_children())
+        
+        warn_cnt = len(result.warnings) if getattr(result, "warnings", None) else 0
+        warn_suffix = f" ({warn_cnt} warnings/issues)" if warn_cnt > 0 else ""
+        
+        if getattr(result, "has_scanned_pages", False):
+            messagebox.showwarning(
+                "Scanned Pages Detected",
+                "Warning: Scanned pages or pages with image-only content were detected. "
+                "No selectable text was found on these pages. Consider enabling OCR mode ('detect') and re-extracting."
+            )
+            
         if result.fmt == "standard":
             for it in self._items[:_PREVIEW_LIMIT]:
                 self.extract_tree.insert("", "end", values=(
@@ -711,16 +757,16 @@ class App(tk.Tk):
             n = len(self._items)
             more = f" (showing {min(n, _PREVIEW_LIMIT)})" if n > _PREVIEW_LIMIT else ""
             self.extract_status.config(
-                text=f"[{result.mode}] {n} clauses{more} → base workbook {result.out_path}")
+                text=f"[{result.mode}] {n} clauses{more} → base workbook {result.out_path}{warn_suffix}")
             self.generate_btn.config(state="normal")
             self.export_btn.config(state="normal")
-            self.run_status.config(text=f"Ready: {n} clauses extracted. "
+            self.run_status.config(text=f"Ready: {n} clauses extracted{warn_suffix}. "
                                    "Configure AI (tab 2), then Generate.")
             self._populate_results(self._enriched)   # A–E now; E–I fill on generate
         else:
             # Default format has no E–I columns to fill — AI step not applicable.
             self.extract_status.config(
-                text=f"[{result.mode}] default workbook → {result.out_path}. "
+                text=f"[{result.mode}] default workbook → {result.out_path}{warn_suffix}. "
                      "Switch to Standard Assessment to enable AI fill.")
             self.generate_btn.config(state="disabled")
         self.open_btn.config(state="normal")
@@ -762,7 +808,14 @@ class App(tk.Tk):
         for it in items[:_PREVIEW_LIMIT]:
             vals = [it.get("clause_id", "")]
             vals += [it.get(field, "") for field in _RESULT_FIELDS.values()]
-            self.result_tree.insert("", "end", values=vals)
+            
+            tags = []
+            if it.get("issues"):
+                tags.append("warning")
+            elif it.get("confidence", 1.0) < 0.5:
+                tags.append("low_conf")
+                
+            self.result_tree.insert("", "end", values=vals, tags=tags)
 
     def _on_result_edit(self, event) -> None:
         """Double-click an E–I cell → inline edit; commit back to the item."""
