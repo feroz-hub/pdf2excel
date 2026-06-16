@@ -25,6 +25,7 @@ import argparse
 import os
 import sys
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -57,6 +58,7 @@ from nist80053_extractor import (
 )
 import layout_blocks
 import standard_patterns
+import standard_profiles
 import structure_parser
 import validation
 import review_export
@@ -78,12 +80,31 @@ class ConvertResult:
     sheets: List[Tuple[str, int, int]] = field(default_factory=list)
     enriched: bool = False                      # AI enrichment (cols E–I) ran
     n_requirements: int = 0                     # rows classified as "Requirement"
-    # Standard format only: the mapped items + resolved metadata, so a caller
-    # (e.g. the GUI) can run AI enrichment afterwards without re-extracting.
+    n_information: int = 0                      # rows classified as "Information"
     items: List[dict] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     has_scanned_pages: bool = False
+    profile: str = ""
+    review_output_path: str | None = None
+    quality_gate_passed: bool = True
+    quality_gate_failures: List[str] = field(default_factory=list)
+    issues_count: int = 0
+    rejected_count: int = 0
+
+
+class QualityGateError(ValueError):
+    """Raised when export quality gate fails (unless suppressed by caller)."""
+
+    def __init__(
+        self,
+        message: str,
+        failures: List[str],
+        result: ConvertResult | None = None,
+    ):
+        super().__init__(message)
+        self.failures = failures
+        self.result = result
 
 
 def detect_kind(pdf_path: str) -> str:
@@ -124,6 +145,284 @@ def detect_kind(pdf_path: str) -> str:
     return "prose"
 
 
+def check_quality_gate(
+    exported_items: List[dict],
+    profile_name: str,
+) -> List[str]:
+    """Verify quality gate checks for NIST/control catalog standards.
+
+    Returns a list of failure descriptions.
+    """
+    failures = []
+    if profile_name not in ("nist80053", "control-catalog"):
+        return failures
+
+    if not exported_items:
+        failures.append("No items were exported.")
+        return failures
+
+    # 1. First exported row is not AC-1
+    first_id = exported_items[0].get("clause_id", "")
+    if first_id != "AC-1":
+        failures.append(f"First exported row is '{first_id}', expected 'AC-1'.")
+
+    # 2. More than 2% rows have blank clause ID
+    blank_ids = sum(1 for it in exported_items if not it.get("clause_id"))
+    pct_blank = blank_ids / len(exported_items)
+    if pct_blank > 0.02:
+        failures.append(f"More than 2% of rows ({pct_blank:.1%}) have blank clause ID.")
+
+    dup_ids = [cid for cid, n in Counter(
+        it.get("clause_id") for it in exported_items if it.get("clause_id")
+    ).items() if n > 1]
+    if dup_ids:
+        failures.append(f"Duplicate clause IDs in export: {', '.join(dup_ids[:5])}.")
+
+    # 3. Any text contains page header/footer/DOI leaks
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if "NIST SP 800-53" in text.upper() and ("REV" in text.upper() or "R EV" in text.upper() or "R E V" in text.upper()):
+            failures.append(f"Row {clause_id} contains page header text 'NIST SP 800-53, REV. 5'.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if "This publication is available free of charge" in text:
+            failures.append(f"Row {clause_id} contains DOI footer text.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if "doi.org/10.6028/NIST.SP.800-53r5" in text:
+            failures.append(f"Row {clause_id} contains DOI URL.")
+            break
+
+    for it in exported_items:
+        title = it.get("title", "")
+        clause_id = it.get("clause_id", "")
+        if "Errata" in title:
+            failures.append(f"Row {clause_id} title contains 'Errata'.")
+            break
+
+    for it in exported_items:
+        title = it.get("title", "")
+        clause_id = it.get("clause_id", "")
+        if "APPENDIX C PAGE" in title.upper():
+            failures.append(f"Row {clause_id} title contains 'APPENDIX C PAGE'.")
+            break
+
+    for it in exported_items:
+        title = it.get("title", "")
+        clause_id = it.get("clause_id", "")
+        if title == "NUMBER":
+            failures.append(f"Row {clause_id} has title 'NUMBER'.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if text.strip() == "NUMBER":
+            failures.append(f"Row {clause_id} has text exactly 'NUMBER'.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        is_withdrawn = "[withdrawn" in text.lower() or it.get("classification") == "Information"
+        if len(text) < 10 and not is_withdrawn:
+            failures.append(f"Row {clause_id} has text length less than 10 ({len(text)} chars) and is not withdrawn.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if "CHAPTER THREE PAGE" in text.upper():
+            failures.append(f"Row {clause_id} contains 'CHAPTER THREE PAGE'.")
+            break
+
+    for it in exported_items:
+        text = it.get("text", "")
+        clause_id = it.get("clause_id", "")
+        if "APPENDIX C PAGE" in text.upper():
+            failures.append(f"Row {clause_id} contains 'APPENDIX C PAGE'.")
+            break
+
+    return failures
+
+
+def _summarize_extraction(
+    items: List[dict],
+    exported_items: List[dict],
+    profile_name: str,
+    review_output: str | None,
+    gate_failures: List[str],
+    warnings: List[str],
+) -> dict:
+    """Build GUI-friendly summary counters."""
+    rejected = sum(1 for it in items if it.get("export_status") == "rejected")
+    issues_count = sum(1 for it in items if it.get("issues"))
+    n_req = sum(1 for it in exported_items if it.get("classification") == "Requirement")
+    n_info = sum(1 for it in exported_items if it.get("classification") == "Information")
+    return {
+        "profile": profile_name,
+        "review_output": review_output,
+        "quality_gate_passed": not gate_failures,
+        "quality_gate_failures": list(gate_failures),
+        "issues_count": issues_count,
+        "rejected_count": rejected,
+        "warnings_count": len(warnings),
+        "n_requirements": n_req,
+        "n_information": n_info,
+    }
+
+
+def _run_structured_standard_pipeline(
+    *,
+    pdf_path: str,
+    out_path: str,
+    mode: str,
+    profile: str,
+    gap_factor: float,
+    ocr_mode: str,
+    skip_cover: bool,
+    include_toc: bool,
+    include_front_matter: bool,
+    include_appendix: bool,
+    include_references: bool,
+    skip_references: bool,
+    min_confidence: float,
+    export_low_confidence: bool,
+    review_output: str | None,
+    force_export: bool,
+    raise_on_quality_gate: bool,
+    enrich_config,
+    progress,
+    _write_standard,
+    _maybe_enrich,
+    _meta,
+) -> ConvertResult:
+    """Structured standards pipeline for ``fmt=standard`` (NIST + generic profiles)."""
+    page_preflights = []
+    has_scanned = False
+    warnings = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            meta = preflight.analyze_page(page, page_num, ocr_mode=ocr_mode)
+            page_preflights.append(meta)
+            if meta["is_scanned"]:
+                has_scanned = True
+            if meta["warnings"]:
+                warnings.extend(meta["warnings"])
+
+    if profile == "auto":
+        profile_name = standard_patterns.detect_profile_from_preflights(page_preflights)
+        if profile_name == "generic" and is_nist_800_53(pdf_path):
+            profile_name = "nist80053"
+    else:
+        profile_name = profile
+
+    prof_obj = standard_profiles.resolve_profile(profile_name)
+
+    if profile_name == "nist80053" or (
+        profile_name == "control-catalog" and is_nist_800_53(pdf_path)
+    ):
+        items = extract_nist_800_53_items(pdf_path)
+        blocks = []
+    else:
+        blocks = layout_blocks.extract_pdf_blocks(
+            pdf_path=pdf_path,
+            page_preflights=page_preflights,
+            gap_factor=gap_factor,
+            ocr_mode=ocr_mode,
+            skip_cover=skip_cover,
+            include_toc=include_toc,
+            include_appendix=include_appendix,
+            include_references=include_references or (not skip_references),
+        )
+        items, _rejected = structure_parser.parse_blocks_to_items(
+            blocks=blocks,
+            profile=prof_obj,
+            include_front_matter=include_front_matter,
+            include_appendix=include_appendix,
+            include_references=include_references or (not skip_references),
+        )
+
+    items = validation.validate_items(items, profile_name=profile_name)
+    for it in items:
+        if it.get("issues"):
+            for iss in it["issues"]:
+                msg = f"Page {it.get('page') or it.get('source_page')}: {iss}"
+                if msg not in warnings:
+                    warnings.append(msg)
+
+    exported_items = validation.filter_exportable_items(
+        items,
+        profile_name=profile_name,
+        min_confidence=min_confidence,
+        export_low_confidence=export_low_confidence,
+    )
+
+    gate_failures = []
+    if profile_name in ("nist80053", "control-catalog"):
+        gate_failures = check_quality_gate(exported_items, profile_name)
+
+    if gate_failures and not force_export:
+        final_export_items = []
+    else:
+        final_export_items = exported_items
+
+    if review_output:
+        review_export.write_review_workbook(items, review_output, profile_name=profile_name)
+
+    paras = [Paragraph(text=b["text"], type=b["block_type"], page=b["page"]) for b in blocks]
+
+    final_export_items, did_enrich, n_req = _maybe_enrich(final_export_items)
+    _write_standard(items, export_items=final_export_items)
+
+    summary = _summarize_extraction(
+        items, final_export_items, profile_name, review_output, gate_failures, warnings,
+    )
+    base_meta = _meta()
+    base_meta.update(summary)
+
+    result = ConvertResult(
+        mode="structured" if mode in ("auto", "standard") else mode,
+        out_path=out_path,
+        fmt="standard",
+        n_items=len(final_export_items),
+        paragraphs=paras,
+        enriched=did_enrich,
+        n_requirements=n_req,
+        n_information=summary["n_information"],
+        items=final_export_items,
+        meta=base_meta,
+        warnings=warnings,
+        has_scanned_pages=has_scanned,
+        profile=profile_name,
+        review_output_path=review_output,
+        quality_gate_passed=not gate_failures,
+        quality_gate_failures=gate_failures,
+        issues_count=summary["issues_count"],
+        rejected_count=summary["rejected_count"],
+    )
+
+    if gate_failures and not force_export:
+        print("LOUD WARNING: Quality gate failed!", file=sys.stderr)
+        for failure in gate_failures:
+            print(f"  - {failure}", file=sys.stderr)
+        msg = (
+            "Quality gate failed! A blank Standard Assessment was written "
+            "with issues in Extraction_Issues. Use --force-export to override."
+        )
+        if raise_on_quality_gate:
+            raise QualityGateError(msg, gate_failures, result=result)
+    return result
+
+
 def convert(
     source: str,
     out_path: str,
@@ -151,20 +450,26 @@ def convert(
     show_issues: bool = False,
     profile: str = "auto",
     include_front_matter: bool = False,
-    include_appendix: bool = True,
+    include_appendix: bool = False,
     skip_references: bool = False,
+    force_export: bool = False,
+    export_low_confidence: bool = False,
+    include_references: bool = False,
+    raise_on_quality_gate: bool = True,
 ) -> ConvertResult:
     """Convert ``source`` to ``out_path``, routing by ``mode`` and ``fmt``.
 
-    ``source`` is a local PDF path or a URL. URLs are sniffed: PDFs go through
-    the existing PDF pipeline; HTML/text pages go through
-    :func:`web_extract.extract_url`. ``mode`` is ``"auto"`` (sniff), ``"prose"``
-    or ``"tables"``; ``fmt`` is ``"default"`` or ``"standard"``. ``gap_factor`` /
-    ``heading_style`` apply only to PDF prose; the ``standard_*`` / ``document_*``
-    args only to standard format. ``insecure`` / ``ca_bundle`` control TLS
-    verification, and ``render`` ("auto"/"always"/"never") the headless-render
-    fallback, when ``source`` is a URL.
+    When ``fmt`` is ``"standard"``, always uses the structured standards pipeline
+    (never raw paragraph/block export).
     """
+    if fmt not in ("default", "standard"):
+        raise ValueError(f"unknown format: {fmt!r}")
+
+    # Normalize routing keys (GUI labels / mixed case must not bypass structured flow).
+    fmt = (fmt or "default").strip().lower()
+    mode = (mode or "auto").strip().lower()
+    profile = (profile or "auto").strip().lower()
+
     if fmt not in ("default", "standard"):
         raise ValueError(f"unknown format: {fmt!r}")
 
@@ -201,7 +506,7 @@ def convert(
         else:
             raise ValueError(f"Unsupported content type: {kind!r}")
 
-    def _write_standard(items) -> None:
+    def _write_standard(items, export_items=None) -> None:
         write_standard_assessment(
             items,
             out_path,
@@ -212,7 +517,10 @@ def convert(
             document_id=document_id,
             document_name=document_name,
             document_revision=document_revision,
+            export_items=export_items,
+            show_issues=show_issues,
         )
+
 
     def _maybe_enrich(items):
         """Run AI enrichment (cols E–I) when an enrich config was supplied.
@@ -259,7 +567,34 @@ def convert(
 
         # PDF (local file or downloaded URL)
 
-        # --- NIST SP 800-53 explicit/original extractor flow ---
+        # --- Standard Assessment: ALWAYS structured pipeline (never prose dump) ---
+        if fmt == "standard":
+            return _run_structured_standard_pipeline(
+                pdf_path=pdf_path,
+                out_path=out_path,
+                mode=mode,
+                profile=profile,
+                gap_factor=gap_factor,
+                ocr_mode=ocr_mode,
+                skip_cover=skip_cover,
+                include_toc=include_toc,
+                include_front_matter=include_front_matter,
+                include_appendix=include_appendix,
+                include_references=include_references,
+                skip_references=skip_references,
+                min_confidence=min_confidence,
+                export_low_confidence=export_low_confidence,
+                review_output=review_output,
+                force_export=force_export,
+                raise_on_quality_gate=raise_on_quality_gate,
+                enrich_config=enrich_config,
+                progress=progress,
+                _write_standard=_write_standard,
+                _maybe_enrich=_maybe_enrich,
+                _meta=_meta,
+            )
+
+        # --- NIST SP 800-53 explicit mode (default workbook format only) ---
         if mode == "nist80053":
             items = extract_nist_800_53_items(pdf_path)
 
@@ -318,126 +653,18 @@ def convert(
                     warnings=warnings,
                 )
 
-        # New Modular extraction flow
-        if mode in ("auto", "standard"):
-            # 1. Page-level Preflight analysis
-            page_preflights = []
-            has_scanned = False
-            warnings = []
-
-            with pdfplumber.open(pdf_path) as pdf:
-                for page_num, page in enumerate(pdf.pages, start=1):
-                    meta = preflight.analyze_page(page, page_num, ocr_mode=ocr_mode)
-                    page_preflights.append(meta)
-                    if meta["is_scanned"]:
-                        has_scanned = True
-                    if meta["warnings"]:
-                        warnings.extend(meta["warnings"])
-
-            # 2. Profile auto-detection / override
-            if profile == "auto":
-                profile_name = standard_patterns.detect_profile_from_preflights(page_preflights)
-            else:
-                profile_name = profile
-
-            prof_obj = standard_patterns.PROFILES.get(profile_name)
-
-            # 3. Block-based extraction using layout_blocks
-            blocks = layout_blocks.extract_pdf_blocks(
-                pdf_path=pdf_path,
-                page_preflights=page_preflights,
-                gap_factor=gap_factor,
-                ocr_mode=ocr_mode,
-                skip_cover=skip_cover,
-                include_toc=include_toc,
-            )
-
-            # 4. Map to standard items using structure_parser
-            items = structure_parser.parse_blocks_to_items(
-                blocks=blocks,
-                profile=prof_obj,
-                include_appendix=include_appendix,
-            )
-
-            # 5. Validation using new validation module
-            items = validation.validate_items(items)
-            for it in items:
-                if it.get("issues"):
-                    for iss in it["issues"]:
-                        msg = f"Page {it.get('page') or it.get('source_page')}: {iss}"
-                        if msg not in warnings:
-                            warnings.append(msg)
-
-            # 6. Filter by min confidence
-            if min_confidence > 0.0:
-                items = [it for it in items if it.get("confidence", 1.0) >= min_confidence]
-
-            # 7. Optional review workbook
-            if review_output:
-                review_export.write_review_workbook(items, review_output, profile_name=profile_name)
-
-            # 8. Write standard or default workbook
-            paras = [Paragraph(text=b["text"], type=b["block_type"], page=b["page"]) for b in blocks]
-
-            if fmt == "standard":
-                items, did_enrich, n_req = _maybe_enrich(items)
-                _write_standard(items)
-                return ConvertResult(
-                    mode=mode,
-                    out_path=out_path,
-                    fmt="standard",
-                    n_items=len(items),
-                    paragraphs=paras,
-                    enriched=did_enrich,
-                    n_requirements=n_req,
-                    items=items,
-                    meta=_meta(),
-                    warnings=warnings,
-                    has_scanned_pages=has_scanned,
-                )
-            else:
-                from openpyxl import Workbook
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Extracted Content"
-                ws.append(["Page", "Clause ID", "Title", "Classification", "Text"])
-                for it in items:
-                    ws.append([
-                        it.get("page") or it.get("source_page") or "",
-                        it.get("clause_id", ""),
-                        it.get("title", ""),
-                        it.get("classification", ""),
-                        it.get("text", "")
-                    ])
-                wb.save(out_path)
-                return ConvertResult(
-                    mode=mode,
-                    out_path=out_path,
-                    paragraphs=paras,
-                    warnings=warnings,
-                    has_scanned_pages=has_scanned,
-                    n_items=len(items),
-                    items=items,
-                )
-
         resolved_mode = detect_kind(pdf_path) if mode == "auto" else mode
         if resolved_mode not in ("prose", "tables"):
             raise ValueError(f"unknown mode: {resolved_mode!r}")
 
         if resolved_mode == "prose":
+            if fmt == "standard":
+                raise ValueError(
+                    "Internal error: fmt=standard must use structured pipeline, not prose extraction."
+                )
             paras = extract_paragraphs(
                 pdf_path, gap_factor=gap_factor, heading_style=heading_style
             )
-            if fmt == "standard":
-                items = paragraphs_to_items(paras)
-                items, did_enrich, n_req = _maybe_enrich(items)
-                _write_standard(items)
-                return ConvertResult(
-                    mode="prose", out_path=out_path, fmt="standard",
-                    n_items=len(items), paragraphs=paras,
-                    enriched=did_enrich, n_requirements=n_req,
-                    items=items, meta=_meta(),
-                )
             write_excel(paras, out_path)
             return ConvertResult(mode="prose", out_path=out_path, paragraphs=paras)
 
@@ -452,16 +679,9 @@ def convert(
         sheets.append(("slides_text", len(slides_text), 2))
 
         if fmt == "standard":
-            items = deck_to_items(pages_tables, slides_text)
-            items, did_enrich, n_req = _maybe_enrich(items)
-            _write_standard(items)
-            return ConvertResult(
-                mode="tables", out_path=out_path, fmt="standard",
-                n_items=len(items), sheets=sheets,
-                enriched=did_enrich, n_requirements=n_req,
-                items=items, meta=_meta(),
+            raise ValueError(
+                "Standard Assessment format must use the structured extraction pipeline."
             )
-
         write_deck_excel(pages_tables, slides_text, out_path)
         return ConvertResult(mode="tables", out_path=out_path, sheets=sheets)
     finally:
@@ -493,8 +713,9 @@ def main(argv=None) -> int:
         help="Heading style for prose mode (default: auto).",
     )
     parser.add_argument("--include-front-matter", action="store_true", help="Include cover/front-matter.")
-    parser.add_argument("--include-appendix", action="store_true", default=True, help="Include appendix pages.")
-    parser.add_argument("--no-include-appendix", dest="include_appendix", action="store_false", help="Skip appendix pages.")
+    parser.add_argument("--include-appendix", action="store_true", help="Include appendix pages.")
+    parser.add_argument("--no-include-appendix", dest="include_appendix", action="store_false", help="Skip appendix pages (default).")
+    parser.set_defaults(include_appendix=False)
     parser.add_argument("--skip-references", action="store_true", help="Skip reference pages.")
     parser.add_argument(
         "--format",
@@ -539,6 +760,10 @@ def main(argv=None) -> int:
     parser.add_argument("--ocr-mode", choices=["off", "detect"], default="off", help="OCR mode.")
     parser.add_argument("--min-confidence", type=float, default=0.0, help="Minimum confidence threshold.")
     parser.add_argument("--show-issues", action="store_true", help="Show extraction issues.")
+    parser.add_argument("--force-export", action="store_true", help="Force export despite quality gate or validation failures.")
+    parser.add_argument("--export-low-confidence", action="store_true", help="Export low-confidence items.")
+    parser.add_argument("--include-references", action="store_true", help="Include reference/bibliography pages.")
+
     # --- AI enrichment (fills Standard Assessment cols E–I; needs --format standard) ---
     parser.add_argument(
         "--ai-fill",
@@ -624,6 +849,9 @@ def main(argv=None) -> int:
             include_front_matter=args.include_front_matter,
             include_appendix=args.include_appendix,
             skip_references=args.skip_references,
+            force_export=args.force_export,
+            export_low_confidence=args.export_low_confidence,
+            include_references=args.include_references,
         )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

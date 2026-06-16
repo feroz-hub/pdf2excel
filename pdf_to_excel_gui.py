@@ -44,13 +44,47 @@ from ai_enrich import (
     renumber_requirements,
 )
 from ai_providers import PROVIDERS, get_provider
-from router import convert
+from router import QualityGateError, convert
 from standard_export import write_standard_assessment
 from web_extract import clean_url
 
-_PREVIEW_LIMIT = 500
-_MODE_LABELS = {"Auto": "auto", "Prose": "prose", "Tables": "tables", "NIST 800-53": "nist80053"}
-_FORMAT_LABELS = {"Default": "default", "Standard Assessment": "standard"}
+_PREVIEW_LIMIT = 100
+_EXTRACT_PREVIEW_LIMIT = 100
+
+FORMAT_MAP = {
+    "Default": "default",
+    "Default Excel": "default",
+    "Standard Assessment": "standard",
+}
+MODE_MAP = {
+    "Auto": "auto",
+    "Prose": "prose",
+    "Tables": "tables",
+    "Standard / Structured": "standard",
+    "NIST 800-53": "nist80053",
+}
+PROFILE_MAP = {
+    "Auto": "auto",
+    "Auto-detect": "auto",
+    "Generic": "generic",
+    "NIST 800-53": "nist80053",
+    "Control Catalog": "control-catalog",
+    "Control catalog": "control-catalog",
+    "ISO-like": "iso",
+    "Legal / Article": "legal",
+    "Legal/article": "legal",
+    "PCI": "pci",
+    "PCI DSS": "pci",
+    "CIS": "cis",
+    "CIS Controls": "cis",
+}
+OCR_MAP = {"Off": "off", "Detect only": "detect", "off": "off", "detect": "detect"}
+
+# Backward-compatible aliases used in combobox values
+_FORMAT_LABELS = FORMAT_MAP
+_MODE_LABELS = MODE_MAP
+_PROFILE_LABELS = PROFILE_MAP
+_OCR_LABELS = OCR_MAP
 _RENDER_LABELS = {"Auto": "auto", "Always": "always", "Never": "never"}
 _PROVIDER_LABELS = {"Claude (Anthropic)": "claude", "OpenAI": "openai",
                     "Gemini (Google)": "gemini", "Ollama (local)": "ollama"}
@@ -73,19 +107,37 @@ _PROMPT_TABS = {
 }
 
 
+def _map_dropdown(label: str, mapping: dict, default: str) -> str:
+    """Map a GUI combobox label to a router value (tolerant of spacing/case)."""
+    text = (label or "").strip()
+    if text in mapping:
+        return mapping[text]
+    lower = text.lower()
+    for key, val in mapping.items():
+        if key.lower() == lower:
+            return val
+    if "standard assessment" in lower or lower == "standard":
+        return "standard"
+    if "default" in lower:
+        return "default"
+    return default
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("pdf2excel — PDF/Web → Excel → AI")
-        self.geometry("1000x720")
-        self.minsize(860, 600)
+        self.geometry("1100x820")
+        self.minsize(920, 680)
 
         # Cross-phase state.
         self._items = []          # base items from phase 1 (A–E)
+        self._export_items = []   # rows actually written to Standard Assessment
         self._meta = {}           # resolved Standard Assessment metadata
         self._enriched = []       # items after AI fill (E–I)
         self._prompt_texts = {}   # prompt key -> Text widget
         self._key_vars = {}       # provider -> StringVar for its API key
+        self._quality_gate_ok = True
 
         self._events: "queue.Queue[tuple]" = queue.Queue()
         self._build_ui()
@@ -113,9 +165,9 @@ class App(tk.Tk):
 
     # -- Tab 1: Input & Extract ------------------------------------------- #
     def _build_extract_tab(self, frm: ttk.Frame) -> None:
-        pad = {"padx": 6, "pady": 4}
+        pad = {"padx": 6, "pady": 3}
         frm.columnconfigure(1, weight=1)
-        frm.rowconfigure(8, weight=1)
+        frm.rowconfigure(11, weight=1)
 
         ttk.Label(frm, text="PDF file or URL:").grid(row=0, column=0, sticky="w", **pad)
         self.pdf_var = tk.StringVar()
@@ -124,94 +176,147 @@ class App(tk.Tk):
 
         ttk.Label(frm, text="Output Excel:").grid(row=1, column=0, sticky="w", **pad)
         self.out_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.out_var).grid(row=1, column=1, sticky="ew", **pad)
+        out_entry = ttk.Entry(frm, textvariable=self.out_var)
+        out_entry.grid(row=1, column=1, sticky="ew", **pad)
+        out_entry.bind("<FocusOut>", lambda _e: self._sync_review_path())
         ttk.Button(frm, text="Save as…", command=self._browse_out).grid(row=1, column=2, **pad)
 
         opts = ttk.Frame(frm)
-        opts.grid(row=2, column=0, columnspan=3, sticky="w", **pad)
+        opts.grid(row=2, column=0, columnspan=3, sticky="ew", **pad)
         ttk.Label(opts, text="Mode:").pack(side="left")
         self.mode_var = tk.StringVar(value="Auto")
-        ttk.Combobox(opts, textvariable=self.mode_var, values=list(_MODE_LABELS),
-                     state="readonly", width=9).pack(side="left", padx=(4, 18))
-        ttk.Label(opts, text="Output format:").pack(side="left")
+        ttk.Combobox(opts, textvariable=self.mode_var,
+                     values=["Auto", "Prose", "Tables", "Standard / Structured"],
+                     state="readonly", width=16).pack(side="left", padx=(4, 12))
+        ttk.Label(opts, text="Format:").pack(side="left")
         self.fmt_var = tk.StringVar(value="Standard Assessment")
-        ttk.Combobox(opts, textvariable=self.fmt_var, values=list(_FORMAT_LABELS),
-                     state="readonly", width=20).pack(side="left", padx=(4, 18))
+        ttk.Combobox(opts, textvariable=self.fmt_var,
+                     values=["Default Excel", "Standard Assessment"],
+                     state="readonly", width=18).pack(side="left", padx=(4, 12))
+        ttk.Label(opts, text="Profile:").pack(side="left")
+        self.profile_var = tk.StringVar(value="Auto")
+        ttk.Combobox(opts, textvariable=self.profile_var,
+                     values=["Auto", "Generic", "NIST 800-53", "Control Catalog",
+                             "ISO-like", "Legal / Article", "PCI", "CIS"],
+                     state="readonly", width=14).pack(side="left", padx=4)
 
-        meta = ttk.Frame(frm)
-        meta.grid(row=3, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Label(meta, text="Standard ID:").pack(side="left")
+        meta1 = ttk.LabelFrame(frm, text="Standard metadata", padding=6)
+        meta1.grid(row=3, column=0, columnspan=3, sticky="ew", **pad)
+        ttk.Label(meta1, text="Standard ID:").grid(row=0, column=0, sticky="w", padx=4)
         self.std_id_var = tk.StringVar(value="MLSR")
-        ttk.Entry(meta, textvariable=self.std_id_var, width=14).pack(side="left", padx=(4, 18))
-        ttk.Label(meta, text="Standard Title:").pack(side="left")
+        ttk.Entry(meta1, textvariable=self.std_id_var, width=14).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Label(meta1, text="Title:").grid(row=0, column=2, sticky="w", padx=4)
         self.std_title_var = tk.StringVar()
-        ttk.Entry(meta, textvariable=self.std_title_var, width=28).pack(side="left", padx=4)
+        ttk.Entry(meta1, textvariable=self.std_title_var, width=24).grid(row=0, column=3, sticky="ew", padx=4)
+        ttk.Label(meta1, text="Edition:").grid(row=0, column=4, sticky="w", padx=4)
+        self.std_edition_var = tk.StringVar()
+        ttk.Entry(meta1, textvariable=self.std_edition_var, width=12).grid(row=0, column=5, sticky="w", padx=4)
+        meta1.columnconfigure(3, weight=1)
+
+        meta2 = ttk.Frame(meta1)
+        meta2.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(6, 0))
+        ttk.Label(meta2, text="Document ID:").pack(side="left")
+        self.doc_id_var = tk.StringVar()
+        ttk.Entry(meta2, textvariable=self.doc_id_var, width=16).pack(side="left", padx=(4, 12))
+        ttk.Label(meta2, text="Name:").pack(side="left")
+        self.doc_name_var = tk.StringVar()
+        ttk.Entry(meta2, textvariable=self.doc_name_var, width=20).pack(side="left", padx=(4, 12))
+        ttk.Label(meta2, text="Revision:").pack(side="left")
+        self.doc_rev_var = tk.StringVar()
+        ttk.Entry(meta2, textvariable=self.doc_rev_var, width=10).pack(side="left", padx=4)
+
+        struct = ttk.LabelFrame(frm, text="Structured extraction & review", padding=6)
+        struct.grid(row=4, column=0, columnspan=3, sticky="ew", **pad)
+        self.gen_review_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(struct, text="Generate review workbook",
+                        variable=self.gen_review_var,
+                        command=self._sync_review_path).grid(row=0, column=0, sticky="w", padx=4)
+        ttk.Label(struct, text="Review output:").grid(row=0, column=1, sticky="e", padx=(8, 4))
+        self.review_var = tk.StringVar()
+        ttk.Entry(struct, textvariable=self.review_var, width=36).grid(row=0, column=2, sticky="ew", padx=4)
+        ttk.Button(struct, text="Browse…", command=self._browse_review).grid(row=0, column=3, padx=4)
+        struct.columnconfigure(2, weight=1)
+
+        row1 = ttk.Frame(struct)
+        row1.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.show_issues_var = tk.BooleanVar(value=True)
+        self.force_export_var = tk.BooleanVar(value=False)
+        self.export_low_conf_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row1, text="Show Extraction_Issues sheet",
+                        variable=self.show_issues_var).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(row1, text="Force export if quality gate fails",
+                        variable=self.force_export_var).pack(side="left", padx=10)
+        ttk.Checkbutton(row1, text="Export low-confidence rows",
+                        variable=self.export_low_conf_var).pack(side="left", padx=10)
+
+        incl = ttk.LabelFrame(frm, text="Include page sections", padding=6)
+        incl.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
+        self.include_front_var = tk.BooleanVar(value=False)
+        self.include_toc_var = tk.BooleanVar(value=False)
+        self.include_appendix_var = tk.BooleanVar(value=False)
+        self.include_refs_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(incl, text="Front matter", variable=self.include_front_var).pack(side="left", padx=8)
+        ttk.Checkbutton(incl, text="TOC", variable=self.include_toc_var).pack(side="left", padx=8)
+        ttk.Checkbutton(incl, text="Appendix", variable=self.include_appendix_var).pack(side="left", padx=8)
+        ttk.Checkbutton(incl, text="References", variable=self.include_refs_var).pack(side="left", padx=8)
 
         tune = ttk.Frame(frm)
-        tune.grid(row=4, column=0, columnspan=3, sticky="w", **pad)
+        tune.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
+        ttk.Label(tune, text="OCR mode:").pack(side="left")
+        self.ocr_display_var = tk.StringVar(value="Off")
+        ttk.Combobox(tune, textvariable=self.ocr_display_var, values=list(_OCR_LABELS),
+                     state="readonly", width=10).pack(side="left", padx=(4, 12))
+        ttk.Label(tune, text="Min confidence:").pack(side="left")
+        self.min_conf_var = tk.StringVar(value="0.0")
+        ttk.Entry(tune, textvariable=self.min_conf_var, width=6).pack(side="left", padx=(4, 12))
         ttk.Label(tune, text="Gap factor:").pack(side="left")
         self.gap_var = tk.DoubleVar(value=1.6)
         ttk.Scale(tune, from_=1.1, to=3.0, variable=self.gap_var, orient="horizontal",
-                  length=160, command=lambda _=None: self._gap_label.config(
+                  length=120, command=lambda _=None: self._gap_label.config(
                       text=f"{self.gap_var.get():.2f}")).pack(side="left", padx=4)
         self._gap_label = ttk.Label(tune, text="1.60")
         self._gap_label.pack(side="left")
-        ttk.Label(tune, text="(prose only)", foreground="#888").pack(side="left", padx=(4, 18))
-        ttk.Label(tune, text="Render JS:").pack(side="left")
+        ttk.Label(tune, text="Render JS:").pack(side="left", padx=(12, 4))
         self.render_var = tk.StringVar(value="Auto")
         ttk.Combobox(tune, textvariable=self.render_var, values=list(_RENDER_LABELS),
-                     state="readonly", width=8).pack(side="left", padx=4)
+                     state="readonly", width=7).pack(side="left", padx=4)
         self.insecure_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(tune, text="Allow insecure TLS",
-                        variable=self.insecure_var).pack(side="left", padx=(12, 18))
-        
-        ttk.Label(tune, text="OCR:").pack(side="left")
-        self.ocr_var = tk.StringVar(value="off")
-        ttk.Combobox(tune, textvariable=self.ocr_var, values=["off", "detect"],
-                     state="readonly", width=7).pack(side="left", padx=4)
-
-        adv = ttk.Frame(frm)
-        adv.grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+                        variable=self.insecure_var).pack(side="left", padx=(12, 0))
         self.skip_cover_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(adv, text="Skip Cover", variable=self.skip_cover_var).pack(side="left", padx=(0, 12))
-        self.include_toc_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(adv, text="Include TOC", variable=self.include_toc_var).pack(side="left", padx=12)
-        
-        ttk.Label(adv, text="Min confidence:").pack(side="left", padx=(12, 4))
-        self.min_conf_var = tk.DoubleVar(value=0.0)
-        ttk.Entry(adv, textvariable=self.min_conf_var, width=5).pack(side="left", padx=(0, 18))
-        
-        ttk.Label(adv, text="Review sheet:").pack(side="left")
-        self.review_var = tk.StringVar()
-        ttk.Entry(adv, textvariable=self.review_var, width=24).pack(side="left", padx=4)
-        ttk.Button(adv, text="Browse…", command=self._browse_review).pack(side="left", padx=4)
 
         act = ttk.Frame(frm)
-        act.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
-        self.extract_btn = ttk.Button(act, text="① Extract → Preview",
+        act.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+        self.extract_btn = ttk.Button(act, text="Run Extraction",
                                       command=self._on_extract)
         self.extract_btn.pack(side="left")
-        self.extract_prog = ttk.Progressbar(act, mode="indeterminate", length=200)
+        self.extract_prog = ttk.Progressbar(act, mode="indeterminate", length=220)
         self.extract_prog.pack(side="left", padx=12)
 
-        self.extract_status = ttk.Label(frm, text="Choose a PDF/URL and click Extract.",
-                                        foreground="#444")
-        self.extract_status.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
+        self.extract_status = ttk.Label(
+            frm, text="Choose a PDF/URL, set Standard Assessment + Profile Auto, then Run Extraction.",
+            foreground="#444", wraplength=900)
+        self.extract_status.grid(row=8, column=0, columnspan=3, sticky="w", **pad)
 
-        prev = ttk.Frame(frm)
-        prev.grid(row=8, column=0, columnspan=3, sticky="nsew", **pad)
+        prev = ttk.LabelFrame(frm, text="Extract preview (first rows)", padding=4)
+        prev.grid(row=11, column=0, columnspan=3, sticky="nsew", **pad)
         prev.rowconfigure(0, weight=1)
         prev.columnconfigure(0, weight=1)
-        cols = ("clause", "title", "text", "class")
-        self.extract_tree = ttk.Treeview(prev, columns=cols, show="headings", height=10)
-        for c, w in zip(cols, (110, 150, 560, 90)):
-            self.extract_tree.heading(c, text=c)
-            self.extract_tree.column(c, width=w, anchor="w",
-                                     stretch=(c == "text"))
+        cols = ("clause", "title", "class", "text", "conf", "issues")
+        self.extract_tree = ttk.Treeview(prev, columns=cols, show="headings", height=8)
+        headings = {
+            "clause": "Clause ID", "title": "Title", "class": "Classification",
+            "text": "Text Preview", "conf": "Confidence", "issues": "Issues",
+        }
+        widths = {"clause": 90, "title": 140, "class": 95, "text": 380, "conf": 70, "issues": 160}
+        for c in cols:
+            self.extract_tree.heading(c, text=headings[c])
+            self.extract_tree.column(c, width=widths[c], anchor="w", stretch=(c == "text"))
         self.extract_tree.grid(row=0, column=0, sticky="nsew")
         ys = ttk.Scrollbar(prev, orient="vertical", command=self.extract_tree.yview)
         ys.grid(row=0, column=1, sticky="ns")
         self.extract_tree.configure(yscrollcommand=ys.set)
+        self.extract_tree.tag_configure("warning", background="#fff3cd")
 
     # -- Tab 2: AI Configuration ------------------------------------------ #
     def _build_ai_tab(self, frm: ttk.Frame) -> None:
@@ -315,7 +420,7 @@ class App(tk.Tk):
     def _build_run_tab(self, frm: ttk.Frame) -> None:
         pad = {"padx": 6, "pady": 4}
         frm.columnconfigure(0, weight=1)
-        frm.rowconfigure(3, weight=1)
+        frm.rowconfigure(4, weight=1)
 
         act = ttk.Frame(frm)
         act.grid(row=0, column=0, sticky="ew", **pad)
@@ -344,12 +449,31 @@ class App(tk.Tk):
                                     foreground="#444")
         self.run_status.grid(row=1, column=0, sticky="w", **pad)
 
-        ttk.Label(frm, text="Log:").grid(row=2, column=0, sticky="w", padx=6)
-        self.log = scrolledtext.ScrolledText(frm, height=6, wrap="word", state="disabled")
-        self.log.grid(row=2, column=0, sticky="ew", padx=6, pady=(20, 4))
+        ext_prev = ttk.LabelFrame(frm, text="Exported items preview", padding=4)
+        ext_prev.grid(row=2, column=0, sticky="nsew", **pad)
+        ext_prev.rowconfigure(0, weight=1)
+        ext_prev.columnconfigure(0, weight=1)
+        pcols = ("clause", "title", "class", "text", "conf", "issues")
+        self.run_preview_tree = ttk.Treeview(ext_prev, columns=pcols, show="headings", height=6)
+        for c, h, w in (
+            ("clause", "Clause ID", 90), ("title", "Title", 130),
+            ("class", "Classification", 90), ("text", "Text Preview", 340),
+            ("conf", "Confidence", 70), ("issues", "Issues", 150),
+        ):
+            self.run_preview_tree.heading(c, text=h)
+            self.run_preview_tree.column(c, width=w, anchor="w", stretch=(c == "text"))
+        self.run_preview_tree.grid(row=0, column=0, sticky="nsew")
+        pys = ttk.Scrollbar(ext_prev, orient="vertical", command=self.run_preview_tree.yview)
+        pys.grid(row=0, column=1, sticky="ns")
+        self.run_preview_tree.configure(yscrollcommand=pys.set)
+        self.run_preview_tree.tag_configure("warning", background="#fff3cd")
 
-        res = ttk.Frame(frm)
-        res.grid(row=3, column=0, sticky="nsew", **pad)
+        ttk.Label(frm, text="Log:").grid(row=3, column=0, sticky="w", padx=6)
+        self.log = scrolledtext.ScrolledText(frm, height=5, wrap="word", state="disabled")
+        self.log.grid(row=3, column=0, sticky="ew", padx=6, pady=(20, 4))
+
+        res = ttk.LabelFrame(frm, text="AI enrichment results (E–I)", padding=4)
+        res.grid(row=4, column=0, sticky="nsew", **pad)
         res.rowconfigure(0, weight=1)
         res.columnconfigure(0, weight=1)
         cols = ("clause", *_RESULT_FIELDS)
@@ -370,7 +494,7 @@ class App(tk.Tk):
         self.result_tree.bind("<Double-1>", self._on_result_edit)
         ttk.Label(frm, text="Double-click an E–I cell to edit. For Rows = Selected, "
                   "multi-select rows in this grid before Generate.",
-                  foreground="#888").grid(row=4, column=0, sticky="w", padx=6)
+                  foreground="#888").grid(row=5, column=0, sticky="w", padx=6)
 
     # ===================================================================== #
     # Settings persistence
@@ -488,6 +612,17 @@ class App(tk.Tk):
     # ===================================================================== #
     # File pickers
     # ===================================================================== #
+    def _default_review_path(self, out_path: str) -> str:
+        base, ext = os.path.splitext(out_path)
+        return f"{base}_review{ext or '.xlsx'}"
+
+    def _sync_review_path(self) -> None:
+        if not self.gen_review_var.get():
+            return
+        out = self.out_var.get().strip()
+        if out and not self.review_var.get().strip():
+            self.review_var.set(self._default_review_path(out))
+
     def _browse_pdf(self) -> None:
         path = filedialog.askopenfilename(
             title="Choose a PDF",
@@ -496,6 +631,7 @@ class App(tk.Tk):
             self.pdf_var.set(path)
             if not self.out_var.get():
                 self.out_var.set(os.path.splitext(path)[0] + ".xlsx")
+            self._sync_review_path()
 
     def _browse_out(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -503,6 +639,7 @@ class App(tk.Tk):
             filetypes=[("Excel workbook", "*.xlsx")])
         if path:
             self.out_var.set(path)
+            self._sync_review_path()
 
     def _browse_review(self) -> None:
         path = filedialog.asksaveasfilename(
@@ -514,6 +651,99 @@ class App(tk.Tk):
     # ===================================================================== #
     # Phase 1: extract  (background thread)
     # ===================================================================== #
+    def _parse_min_confidence(self) -> float | None:
+        raw = self.min_conf_var.get().strip()
+        try:
+            val = float(raw)
+        except ValueError:
+            return None
+        if val < 0.0 or val > 1.0:
+            return None
+        return val
+
+    def _collect_extract_kwargs(self) -> dict | None:
+        """Build router.convert kwargs from GUI fields; return None if validation fails."""
+        min_conf = self._parse_min_confidence()
+        if min_conf is None:
+            messagebox.showerror("pdf2excel", "Minimum confidence must be a number between 0.0 and 1.0.")
+            return None
+
+        out = self.out_var.get().strip()
+        review_output = None
+        if self.gen_review_var.get():
+            review_output = self.review_var.get().strip() or (
+                self._default_review_path(out) if out else ""
+            )
+            if not review_output:
+                messagebox.showerror("pdf2excel", "Set an output Excel path or review workbook path.")
+                return None
+
+        fmt = _map_dropdown(self.fmt_var.get(), FORMAT_MAP, "standard")
+        mode = _map_dropdown(self.mode_var.get(), MODE_MAP, "auto")
+        profile = _map_dropdown(self.profile_var.get(), PROFILE_MAP, "auto")
+
+        # Standard Assessment must use structured pipeline — never prose/table dump.
+        if fmt == "standard" and mode in ("prose", "tables"):
+            mode = "auto"
+
+        kwargs = dict(
+            mode=mode,
+            fmt=fmt,
+            profile=profile,
+            gap_factor=float(self.gap_var.get()),
+            standard_id=self.std_id_var.get().strip() or "MLSR",
+            standard_title=self.std_title_var.get().strip(),
+            standard_edition=self.std_edition_var.get().strip(),
+            document_id=self.doc_id_var.get().strip(),
+            document_name=self.doc_name_var.get().strip(),
+            document_revision=self.doc_rev_var.get().strip(),
+            insecure=bool(self.insecure_var.get()),
+            render=_RENDER_LABELS.get(self.render_var.get(), "auto"),
+            ocr_mode=_map_dropdown(self.ocr_display_var.get(), OCR_MAP, "off"),
+            min_confidence=min_conf,
+            review_output=review_output,
+            show_issues=bool(self.show_issues_var.get()),
+            force_export=bool(self.force_export_var.get()),
+            export_low_confidence=bool(self.export_low_conf_var.get()),
+            include_front_matter=bool(self.include_front_var.get()),
+            include_toc=bool(self.include_toc_var.get()),
+            include_appendix=bool(self.include_appendix_var.get()),
+            include_references=bool(self.include_refs_var.get()),
+            skip_cover=bool(self.skip_cover_var.get()),
+            raise_on_quality_gate=False,
+        )
+        kwargs["_debug_labels"] = {
+            "source": self.pdf_var.get().strip(),
+            "output": out,
+            "format_label": self.fmt_var.get(),
+            "mode_label": self.mode_var.get(),
+            "profile_label": self.profile_var.get(),
+        }
+        return kwargs
+
+    def _log_extract_options(self, out: str, kwargs: dict) -> None:
+        labels = kwargs.pop("_debug_labels", {})
+        lines = [
+            "Extraction options:",
+            f"  Source: {labels.get('source', '')}",
+            f"  Output: {out}",
+            f"  Format: {labels.get('format_label', '')} -> {kwargs.get('fmt')}",
+            f"  Mode: {labels.get('mode_label', '')} -> {kwargs.get('mode')}",
+            f"  Profile: {labels.get('profile_label', '')} -> {kwargs.get('profile')}",
+            f"  Review output: {kwargs.get('review_output') or '(none)'}",
+            f"  Show issues: {kwargs.get('show_issues')}",
+            f"  Force export: {kwargs.get('force_export')}",
+            f"  Export low confidence: {kwargs.get('export_low_confidence')}",
+            f"  Include front matter: {kwargs.get('include_front_matter')}",
+            f"  Include TOC: {kwargs.get('include_toc')}",
+            f"  Include appendix: {kwargs.get('include_appendix')}",
+            f"  Include references: {kwargs.get('include_references')}",
+            f"  OCR mode: {kwargs.get('ocr_mode')}",
+            f"  Minimum confidence: {kwargs.get('min_confidence')}",
+        ]
+        for line in lines:
+            self._log(line)
+
     def _on_extract(self) -> None:
         src = self.pdf_var.get().strip()
         out = self.out_var.get().strip()
@@ -532,21 +762,14 @@ class App(tk.Tk):
             base = "" if is_url else os.path.splitext(os.path.basename(src))[0]
             out = (base or "web_export") + ".xlsx"
             self.out_var.set(out)
+        self._sync_review_path()
 
-        kwargs = dict(
-            mode=_MODE_LABELS.get(self.mode_var.get(), "auto"),
-            fmt=_FORMAT_LABELS.get(self.fmt_var.get(), "standard"),
-            gap_factor=float(self.gap_var.get()),
-            standard_id=self.std_id_var.get().strip() or "MLSR",
-            standard_title=self.std_title_var.get().strip(),
-            insecure=bool(self.insecure_var.get()),
-            render=_RENDER_LABELS.get(self.render_var.get(), "auto"),
-            ocr_mode=self.ocr_var.get(),
-            min_confidence=float(self.min_conf_var.get() or 0.0),
-            review_output=self.review_var.get().strip() or None,
-            include_toc=bool(self.include_toc_var.get()),
-            skip_cover=bool(self.skip_cover_var.get()),
-        )
+        kwargs = self._collect_extract_kwargs()
+        if kwargs is None:
+            return
+
+        self._log_clear()
+        self._log_extract_options(out, dict(kwargs))
         self.extract_btn.config(state="disabled")
         self.extract_prog.start(12)
         self.extract_status.config(text="Extracting…")
@@ -555,8 +778,13 @@ class App(tk.Tk):
 
     def _extract_worker(self, src, out, kwargs) -> None:
         try:
-            result = convert(src, out, **kwargs)   # phase 1: no enrichment
+            result = convert(src, out, **kwargs)
             self._events.put(("extract_done", result))
+        except QualityGateError as exc:
+            if exc.result is not None:
+                self._events.put(("extract_qg_failed", exc.result, exc.failures))
+            else:
+                self._events.put(("extract_err", str(exc)))
         except Exception as exc:  # noqa: BLE001
             self._events.put(("extract_err", str(exc)))
 
@@ -599,7 +827,14 @@ class App(tk.Tk):
 
     def _on_generate(self) -> None:
         if not self._items:
-            messagebox.showinfo("pdf2excel", "Extract a Standard Assessment first (tab 1).")
+            messagebox.showinfo("pdf2excel", "Run extraction first (tab 1).")
+            return
+        if not getattr(self, "_quality_gate_ok", True):
+            messagebox.showerror(
+                "pdf2excel",
+                "Quality gate did not pass. Fix extraction issues or enable "
+                "Force export before running AI enrichment.",
+            )
             return
         targets = self._selected_indices()
         if not targets:
@@ -647,8 +882,17 @@ class App(tk.Tk):
         out = self.out_var.get().strip()
         meta = dict(self._meta)
         meta.setdefault("standard_id", self.std_id_var.get().strip() or "MLSR")
+        # After AI enrichment, export all rows; otherwise only validated export rows.
+        export_items = None
+        if self._enriched and self._enriched != self._items:
+            export_items = None
+        elif self._export_items:
+            export_items = self._export_items
         try:
-            write_standard_assessment(items, out, **meta)
+            write_standard_assessment(
+                items, out, export_items=export_items, **meta,
+                show_issues=bool(self.show_issues_var.get()),
+            )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("pdf2excel", f"Export failed:\n{exc}")
             return
@@ -702,6 +946,11 @@ class App(tk.Tk):
             self.extract_prog.stop()
             self.extract_btn.config(state="normal")
             self._after_extract(event[1])
+        elif kind == "extract_qg_failed":
+            self.extract_prog.stop()
+            self.extract_btn.config(state="normal")
+            result, failures = event[1], event[2]
+            self._after_extract(result, quality_gate_failed=True, gate_failures=failures)
         elif kind == "extract_err":
             self.extract_prog.stop()
             self.extract_btn.config(state="normal")
@@ -733,41 +982,127 @@ class App(tk.Tk):
     # ===================================================================== #
     # Result rendering
     # ===================================================================== #
-    def _after_extract(self, result) -> None:
+    def _populate_extract_preview(self, items, tree: ttk.Treeview) -> None:
+        tree.delete(*tree.get_children())
+        for it in items[:_EXTRACT_PREVIEW_LIMIT]:
+            text = (it.get("text") or "")[:120]
+            if len(it.get("text") or "") > 120:
+                text += "…"
+            issues = it.get("issues") or []
+            issue_str = ", ".join(issues[:3])
+            if len(issues) > 3:
+                issue_str += "…"
+            tags = ("warning",) if issues else ()
+            tree.insert("", "end", values=(
+                it.get("clause_id", ""),
+                it.get("title", ""),
+                it.get("classification", ""),
+                text,
+                f"{it.get('confidence', 1.0):.2f}",
+                issue_str,
+            ), tags=tags)
+
+    def _format_extract_summary(self, result, gate_failures=None) -> str:
+        meta = result.meta or {}
+        profile = result.profile or meta.get("profile", "")
+        lines = [
+            "Extraction completed.",
+            f"Output: {result.out_path}",
+        ]
+        review = result.review_output_path or meta.get("review_output")
+        if review:
+            lines.append(f"Review workbook: {review}")
+        lines.extend([
+            f"Mode used: {result.mode}",
+            f"Format: {result.fmt}",
+            f"Profile: {profile or 'n/a'}",
+            f"Items exported: {result.n_items}",
+            f"Requirements: {result.n_requirements or meta.get('n_requirements', 0)}",
+            f"Information: {result.n_information or meta.get('n_information', 0)}",
+            f"Issues: {result.issues_count or meta.get('issues_count', 0)}",
+            f"Rejected blocks: {result.rejected_count or meta.get('rejected_count', 0)}",
+            f"Quality gate passed: {result.quality_gate_passed}",
+            f"Warnings: {len(result.warnings)}",
+        ])
+        if gate_failures:
+            lines.append("Quality gate: FAILED")
+            for f in gate_failures[:8]:
+                lines.append(f"  • {f}")
+        elif not result.quality_gate_passed:
+            lines.append("Quality gate: FAILED (no rows exported)")
+        else:
+            lines.append("Quality gate: passed")
+        if self.force_export_var.get() and result.n_items:
+            lines.append("Note: Force export was enabled.")
+        return "\n".join(lines)
+
+    def _after_extract(self, result, quality_gate_failed: bool = False,
+                       gate_failures=None) -> None:
         self._items = list(result.items)
+        self._export_items = list(result.items)
         self._meta = dict(result.meta)
-        self._enriched = [dict(it) for it in self._items]   # working copy to merge into
-        self.extract_tree.delete(*self.extract_tree.get_children())
-        
-        warn_cnt = len(result.warnings) if getattr(result, "warnings", None) else 0
-        warn_suffix = f" ({warn_cnt} warnings/issues)" if warn_cnt > 0 else ""
-        
+        self._enriched = [dict(it) for it in self._items]
+        self._quality_gate_ok = result.quality_gate_passed and not quality_gate_failed
+
+        self._populate_extract_preview(self._export_items, self.extract_tree)
+        self._populate_extract_preview(self._export_items, self.run_preview_tree)
+
+        # Preview sanity check for NIST-like output
+        if self._export_items and result.fmt == "standard":
+            first = self._export_items[0]
+            if len(self._export_items) > 3000:
+                self._log(f"WARNING: {len(self._export_items)} rows exported — likely wrong extractor.")
+            elif first.get("clause_id") != "AC-1" and "800-53" in (self.pdf_var.get() or ""):
+                self._log(
+                    f"WARNING: first row is {first.get('clause_id')!r}, expected 'AC-1' for NIST PDF."
+                )
+
+        summary = self._format_extract_summary(result, gate_failures)
+        self._log_clear()
+        self._log(summary)
+
         if getattr(result, "has_scanned_pages", False):
             messagebox.showwarning(
                 "Scanned Pages Detected",
-                "Warning: Scanned pages or pages with image-only content were detected. "
-                "No selectable text was found on these pages. Consider enabling OCR mode ('detect') and re-extracting."
+                "Scanned or image-only pages were detected. "
+                "Enable OCR mode 'Detect only' and re-run if needed.",
             )
-            
-        if result.fmt == "standard":
-            for it in self._items[:_PREVIEW_LIMIT]:
-                self.extract_tree.insert("", "end", values=(
-                    it.get("clause_id", ""), it.get("title", ""),
-                    it.get("text", ""), it.get("classification", "")))
-            n = len(self._items)
-            more = f" (showing {min(n, _PREVIEW_LIMIT)})" if n > _PREVIEW_LIMIT else ""
-            self.extract_status.config(
-                text=f"[{result.mode}] {n} clauses{more} → base workbook {result.out_path}{warn_suffix}")
+
+        if quality_gate_failed or not result.quality_gate_passed:
+            review = result.review_output_path or (result.meta or {}).get("review_output")
+            extra = f"\n\nReview workbook:\n{review}" if review else ""
+            messagebox.showerror(
+                "Quality Gate Failed",
+                "Quality gate failed. Bad rows were not exported.\n"
+                "Check the review workbook and Extraction_Issues sheet."
+                + extra,
+            )
+            self.generate_btn.config(state="disabled")
+        elif self.force_export_var.get() and result.n_items:
+            messagebox.showwarning(
+                "Force Export",
+                "Force export enabled. Output may contain low-quality rows.",
+            )
+
+        if result.fmt == "standard" and self._quality_gate_ok:
             self.generate_btn.config(state="normal")
             self.export_btn.config(state="normal")
-            self.run_status.config(text=f"Ready: {n} clauses extracted{warn_suffix}. "
-                                   "Configure AI (tab 2), then Generate.")
-            self._populate_results(self._enriched)   # A–E now; E–I fill on generate
+        elif result.fmt == "standard":
+            self.export_btn.config(state="normal")
+
+        short = (
+            f"{'Quality gate failed — ' if not self._quality_gate_ok else ''}"
+            f"{result.n_items} rows exported · "
+            f"{result.issues_count} issue rows · "
+            f"{len(result.warnings)} warnings"
+        )
+        self.extract_status.config(text=short)
+        self.run_status.config(
+            text=f"{'Ready for AI fill.' if self._quality_gate_ok else 'Fix extraction issues before AI fill.'} "
+                 f"See log for details.")
+        if result.fmt == "standard":
+            self._populate_results(self._enriched)
         else:
-            # Default format has no E–I columns to fill — AI step not applicable.
-            self.extract_status.config(
-                text=f"[{result.mode}] default workbook → {result.out_path}{warn_suffix}. "
-                     "Switch to Standard Assessment to enable AI fill.")
             self.generate_btn.config(state="disabled")
         self.open_btn.config(state="normal")
 

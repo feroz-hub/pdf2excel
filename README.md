@@ -457,31 +457,40 @@ python router.py "<url>" --insecure -o out.xlsx        # trusted sources only
 
 ## Desktop GUI — `pdf_to_excel_gui.py`
 
-A thin Tkinter shell over `router.convert` + `ai_enrich.enrich` (no extraction or
-AI logic of its own), organised as a three-tab workflow:
+A thin Tkinter shell over `router.convert` + `ai_enrich.enrich` (no extraction logic
+in the GUI). Three tabs:
 
-1. **Input & Extract** — PDF file or URL, output path, **Mode** (Auto/Prose/Tables),
-   **Output format** (Default / Standard Assessment), Standard ID/Title, gap-factor
-   slider, **Render JavaScript** and **Allow insecure TLS** for URL fetches. *Extract
-   → Preview* runs phase 1 on a background thread and lists the extracted clauses.
-2. **AI Configuration** — **Provider** (Claude / OpenAI / Gemini) and **Model**
-   dropdowns, a masked **API key** field (saved to `~/.pdf2excel.json`), batch size /
-   workers / max-tokens / temperature, toggles (**Dry-run**, *fill F–I only for
-   Requirements*, *use cache*), the **column-I vocabulary**, a fully **editable
-   prompt per column**, and an **Estimate cost** button.
-3. **Run & Results** — *Generate with AI* runs the enrichment (progress bar + live
-   log), shows the E–I results in a grid you can **double-click to edit**, then
-   *Export to Excel* writes the finished workbook. The **Rows** selector
-   (All / Selected / First N) enriches every clause, only the rows you multi-select
-   in the grid, or just the first N — handy for cheap **test runs**; partial results
-   merge back into the sheet and requirement ids stay continuous.
+1. **Input & Extract** — PDF/URL, output path, **Mode** (Auto / Prose / Tables /
+   Standard / Structured / NIST 800-53), **Format** (Default / Standard Assessment),
+   **Profile** (Auto, Generic, NIST 800-53, Control Catalog, ISO-like, Legal,
+   PCI, CIS), standard & document metadata, structured extraction options (review
+   workbook, Extraction_Issues sheet, force export, low-confidence rows, include
+   front matter/TOC/appendix/references), OCR mode, minimum confidence, then
+   **Run Extraction**.
+2. **AI Configuration** — provider, model, API key, batch/workers/temperature,
+   editable prompts, cost estimate. AI runs only after a successful extraction.
+3. **Run & Results** — exported-items preview, log summary, AI enrichment grid,
+   export to Excel.
 
-Everything runs on background threads, so the window stays responsive.
+### Recommended workflow for standards PDFs
 
-> **macOS Tk:** the app silences Apple's *"system Tk 8.5 is deprecated"* warning
-> automatically. For a current, non-deprecated **Tk 8.6**, run from a Python built
-> against Tcl/Tk 8.6 — e.g. a conda environment (conda's Python bundles Tk 8.6) or
-> the python.org installer — rather than the macOS system Python.
+1. Open the GUI: `python pdf_to_excel_gui.py`
+2. Select your PDF (e.g. `NIST.SP.800-53r5.pdf`)
+3. **Format** = Standard Assessment · **Profile** = Auto
+4. Leave **Generate review workbook** and **Show Extraction_Issues sheet** checked
+5. Click **Run Extraction**
+6. Open the review workbook (`*_review.xlsx`) to inspect rejected blocks
+7. If the quality gate passes (or you intentionally force export), run **Generate with AI** on tab 3
+
+### GUI verification checklist (NIST)
+
+| Check | Expected |
+|-------|----------|
+| Row 10 in output | `AC-1` |
+| Front matter | not exported |
+| AC-2(1) | one complete row with Discussion inside text |
+| Review workbook | generated beside output |
+| GUI summary | issue/warning counts visible in log |
 
 ```bash
 python pdf_to_excel_gui.py

@@ -164,6 +164,12 @@ def analyze_page(page: Any, page_num: int, ocr_mode: str = "off") -> Dict[str, A
         
         if has_toc_keywords or has_dots:
             page_type = "toc"
+        elif re.search(r"\bappendix\s+[a-c]\b", lower_text[:500]):
+            page_type = "appendix"
+        elif re.search(r"\breferences\b", lower_text[:500]) and page_num > 10:
+            page_type = "references"
+        elif re.search(r"\bglossary\b|\bacronyms\b", lower_text[:500]):
+            page_type = "glossary"
         elif page_num == 1 and word_count < 300:
             page_type = "cover"
         elif has_tables:
@@ -208,18 +214,22 @@ def analyze_page(page: Any, page_num: int, ocr_mode: str = "off") -> Dict[str, A
         confidence = 0.9
         
     return {
+        "page": page_num,
         "page_number": page_num,
         "has_selectable_text": has_selectable_text,
         "text_char_count": char_count,
         "word_count": word_count,
         "is_scanned": is_scanned,
+        "orientation": "portrait" if is_portrait else "landscape",
         "is_portrait": is_portrait,
         "has_tables": has_tables,
         "has_rotated_text": has_rotated_text,
         "page_type": page_type,
+        "likely_page_type": page_type,
         "likely_standard_type": likely_standard_type,
+        "profile_candidate": likely_standard_type,
         "is_multi_column": is_multi_column,
         "confidence": confidence,
         "warnings": warnings,
-        "ocr_text": ocr_text
+        "ocr_text": ocr_text,
     }

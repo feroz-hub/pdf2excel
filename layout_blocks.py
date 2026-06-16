@@ -20,7 +20,9 @@ from deck_tables_to_excel import _extract_page_tables, _merge_side_by_side
 from pdf_paragraphs_to_excel import _clean_text as _para_clean_text, _looks_like_page_number, _SENTENCE_END_RE, _HYPHEN_END_RE, _normalize_digits
 from standard_patterns import parse_heading_generic, match_section_label
 
-log = logging.getLogger("pdf2excel.layout_blocks")
+# Header/footer y thresholds (typical NIST letter page ~792pt)
+_HEADER_Y = 55.0
+_FOOTER_Y = 740.0
 
 # List start marker: bullets or (a), 1) etc.
 LIST_START_RE = re.compile(r"^([•\-\*\▪\◦\♦]|\([a-z0-9]+\)|[a-z0-9]+\))\s+", re.IGNORECASE)
@@ -219,9 +221,9 @@ def group_lines_into_blocks(
             issues = []
 
             # Safety check: one-letter fragments
-            if len(text) <= 2 and not text.isalnum():
-                issues.append("single_char_text")
-                confidence = min(confidence, 0.2)
+            if len(text) <= 2 and not re.match(r"^[A-Z]{2}-\d", text):
+                issues.append("one_letter_fragment")
+                confidence = min(confidence, 0.1)
 
             blocks.append({
                 "page": page_num,
@@ -406,6 +408,10 @@ def extract_page_blocks(
     for w in words:
         cx = (w["x0"] + w["x1"]) / 2
         cy = (w["top"] + w["bottom"]) / 2
+
+        # Skip page header/footer bands
+        if w["top"] < _HEADER_Y or w["top"] > _FOOTER_Y:
+            continue
         
         # Rotated text filter: if upright=False and sits in margin, filter it
         if w.get("upright") is False and w["x0"] < 45:
@@ -469,39 +475,53 @@ def extract_pdf_blocks(
     gap_factor: float = 1.6,
     ocr_mode: str = "off",
     skip_cover: bool = True,
-    include_toc: bool = False
+    include_toc: bool = False,
+    include_appendix: bool = False,
+    include_references: bool = False,
 ) -> List[Dict[str, Any]]:
     """Extract layout blocks across all pages of a PDF, detecting boilerplate."""
     if not pdfplumber:
         raise RuntimeError("pdfplumber is not installed.")
 
-    # Calculate document-wide median font size
+    # Calculate document-wide median font size (sampled for performance on large documents)
     sizes = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        step = max(1, len(pdf.pages) // 20)
+        for idx in range(0, len(pdf.pages), step):
+            page = pdf.pages[idx]
             try:
                 for w in page.extract_words(extra_attrs=["size"]):
                     if w.get("size") is not None:
                         sizes.append(w["size"])
             except Exception:
-                for w in page.extract_words():
-                    sizes.append(10.0)
+                try:
+                    for w in page.extract_words():
+                        sizes.append(10.0)
+                except Exception:
+                    pass
     doc_median_size = statistics.median(sizes) if sizes else 10.0
+
 
     # Boilerplate detection
     all_pages_lines = []
     preflight_by_page = {p["page_number"]: p for p in page_preflights}
 
+    def _skip_page(meta: Dict[str, Any]) -> bool:
+        if skip_cover and meta.get("page_type") == "cover":
+            return True
+        if not include_toc and meta.get("page_type") == "toc":
+            return True
+        lpt = meta.get("likely_page_type") or meta.get("page_type")
+        if not include_appendix and lpt == "appendix":
+            return True
+        if not include_references and lpt in ("references", "glossary"):
+            return True
+        return False
+
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             meta = preflight_by_page.get(page_num)
-            if not meta:
-                continue
-            if skip_cover and meta["page_type"] == "cover":
-                continue
-            if not include_toc and meta["page_type"] == "toc":
-                continue
-            if meta["is_scanned"]:
+            if not meta or _skip_page(meta):
                 continue
 
             words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
@@ -538,11 +558,7 @@ def extract_pdf_blocks(
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             meta = preflight_by_page.get(page_num)
-            if not meta:
-                continue
-            if skip_cover and meta["page_type"] == "cover":
-                continue
-            if not include_toc and meta["page_type"] == "toc":
+            if not meta or _skip_page(meta):
                 continue
 
             page_blocks = extract_page_blocks(

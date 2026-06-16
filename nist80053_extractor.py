@@ -308,48 +308,45 @@ def _find_catalog_pages(pdf) -> tuple:
 # ---------------------------------------------------------------------------
 
 def extract_nist_800_53_items(pdf_path: str) -> List[dict]:
-    """Extract NIST SP 800-53 Rev. 5 controls and enhancements.
+    """Extract NIST SP 800-53 Rev. 5 controls and enhancements (line-level parser).
 
-    Returns Standard Assessment items:
-    {
-        "clause_id": "AC-1",
-        "title": "POLICY AND PROCEDURES",
-        "text": "Control: ... Discussion: ... Related Controls: ...",
-        "classification": "Requirement" | "Information",
-        "source_page": 45,
-        "confidence": 0.95,
-        "issues": []
-    }
+    Uses catalog page boundaries and word-level line extraction to avoid block-
+    grouping errors (e.g. numbered control sub-clauses mistaken for enhancements).
     """
     if pdfplumber is None:
         raise RuntimeError("pdfplumber is required. Run: pip install pdfplumber")
 
-    items: List[dict] = []
+    import validation
 
+    all_lines: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         start_idx, end_idx = _find_catalog_pages(pdf)
-        log.info(
-            "Catalog pages: %d to %d (of %d total)",
-            start_idx + 1, end_idx, len(pdf.pages),
-        )
-
-        # First pass: collect all lines across the catalog pages
-        all_lines: List[dict] = []  # each has extra "page" key
         for pg_idx in range(start_idx, end_idx):
             page = pdf.pages[pg_idx]
-            page_num = pg_idx + 1
-            lines = _extract_clean_lines(page)
-            for line in lines:
-                line["page"] = page_num
-            all_lines.extend(lines)
+            for line in _extract_clean_lines(page):
+                line["page"] = pg_idx + 1
+                all_lines.append(line)
 
-    # Second pass: parse into controls and enhancements
     items = _parse_controls(all_lines)
-
-    # Validation pass
     items = _validate_items(items)
+    items = validation.validate_items(items, profile_name="nist80053")
 
-    return items
+    filtered: List[dict] = []
+    for it in items:
+        if any(iss in validation.BLOCKING_ISSUES for iss in it.get("issues", [])):
+            continue
+        if not (it.get("text") or "").strip():
+            continue
+        if not (it.get("clause_id") or "").strip():
+            continue
+        if "doi.org" in (it.get("text") or "").lower():
+            continue
+        it["source_page"] = it.get("source_page") or it.get("page", 1)
+        it.setdefault("export_status", "exported")
+        filtered.append(it)
+
+    return filtered
+
 
 
 def _parse_controls(all_lines: List[dict]) -> List[dict]:

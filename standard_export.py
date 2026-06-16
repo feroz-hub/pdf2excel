@@ -238,6 +238,8 @@ def write_standard_assessment(
     document_id: str = "",
     document_name: str = "",
     document_revision: str = "",
+    export_items=None,
+    show_issues: bool = True,
 ) -> None:
     """Populate the Standard Assessment template and save it to ``out_path``."""
     from openpyxl import load_workbook
@@ -271,8 +273,10 @@ def write_standard_assessment(
     font = Font(name="Times New Roman", size=10)
     align = Alignment(vertical="top", wrap_text=True)
 
+    actual_export = export_items if export_items is not None else items
+
     prev_clause = None
-    for i, item in enumerate(items, start=1):
+    for i, item in enumerate(actual_export, start=1):
         row = DATA_START_ROW + i - 1
         clause = (item.get("clause_id") or "").strip()
         values = {
@@ -297,8 +301,8 @@ def write_standard_assessment(
             cell.alignment = align
         prev_clause = clause
 
-    # Write Extraction_Issues sheet if any issues exist
-    has_issues = any(it.get("issues") for it in items)
+    # Write Extraction_Issues sheet when requested and issues exist
+    has_issues = show_issues and any(it.get("issues") for it in items)
     if has_issues:
         if "Extraction_Issues" in wb.sheetnames:
             ws_issues = wb["Extraction_Issues"]
@@ -346,3 +350,4 @@ def write_standard_assessment(
             ws_issues.column_dimensions[get_column_letter(col_idx)].width = w
 
     wb.save(out_path)
+
