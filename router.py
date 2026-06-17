@@ -77,25 +77,50 @@ class ConvertResult:
     n_items: int = 0                            # rows written in standard format
     paragraphs: List[Paragraph] = field(default_factory=list)
     # For tables mode: (sheet_name, n_rows, n_cols) per worksheet written.
-    sheets: List[Tuple[str, int, int]] = field(default_factory=list)
-    enriched: bool = False                      # AI enrichment (cols E–I) ran
-    n_requirements: int = 0                     # rows classified as "Requirement"
-    n_information: int = 0                      # rows classified as "Information"
-    items: List[dict] = field(default_factory=list)
-    meta: dict = field(default_factory=dict)
-    warnings: List[str] = field(default_factory=list)
-    has_scanned_pages: bool = False
-    profile: str = ""
-    review_output_path: str | None = None
-    quality_gate_passed: bool = True
-    quality_gate_failures: List[str] = field(default_factory=list)
-    issues_count: int = 0
-    rejected_count: int = 0
+    def __init__(
+        self,
+        mode: str,
+        out_path: str,
+        n_items: int = 0,
+        paragraphs=None,
+        sheets=None,
+        fmt: str = "default",
+        enriched: bool = False,
+        n_requirements: int = 0,
+        n_information: int = 0,
+        items=None,
+        meta=None,
+        warnings=None,
+        has_scanned_pages: bool = False,
+        profile: str = "",
+        review_output_path: str | None = None,
+        quality_gate_passed: bool = True,
+        quality_gate_failures=None,
+        issues_count: int = 0,
+        rejected_count: int = 0,
+    ):
+        self.mode = mode
+        self.out_path = out_path
+        self.n_items = n_items
+        self.paragraphs = paragraphs or []
+        self.sheets = sheets or []
+        self.fmt = fmt
+        self.enriched = enriched
+        self.n_requirements = n_requirements
+        self.n_information = n_information
+        self.items = items or []
+        self.meta = meta or {}
+        self.warnings = warnings or []
+        self.has_scanned_pages = has_scanned_pages
+        self.profile = profile
+        self.review_output_path = review_output_path
+        self.quality_gate_passed = quality_gate_passed
+        self.quality_gate_failures = quality_gate_failures or []
+        self.issues_count = issues_count
+        self.rejected_count = rejected_count
 
 
-class QualityGateError(ValueError):
-    """Raised when export quality gate fails (unless suppressed by caller)."""
-
+class QualityGateError(Exception):
     def __init__(
         self,
         message: str,
@@ -105,6 +130,27 @@ class QualityGateError(ValueError):
         super().__init__(message)
         self.failures = failures
         self.result = result
+
+
+def _standard_writer_kwargs(
+    template_path=None,
+    standard_id="",
+    standard_title="",
+    standard_edition="",
+    document_id="",
+    document_name="",
+    document_revision="",
+    **kwargs
+):
+    return {
+        "template_path": template_path,
+        "standard_id": standard_id,
+        "standard_title": standard_title,
+        "standard_edition": standard_edition,
+        "document_id": document_id,
+        "document_name": document_name,
+        "document_revision": document_revision,
+    }
 
 
 def detect_kind(pdf_path: str) -> str:
@@ -507,9 +553,7 @@ def convert(
             raise ValueError(f"Unsupported content type: {kind!r}")
 
     def _write_standard(items, export_items=None) -> None:
-        write_standard_assessment(
-            items,
-            out_path,
+        kwargs = _standard_writer_kwargs(
             template_path=template_path,
             standard_id=standard_id,
             standard_title=standard_title,
@@ -517,8 +561,13 @@ def convert(
             document_id=document_id,
             document_name=document_name,
             document_revision=document_revision,
+        )
+        write_standard_assessment(
+            items,
+            out_path,
             export_items=export_items,
             show_issues=show_issues,
+            **kwargs
         )
 
 

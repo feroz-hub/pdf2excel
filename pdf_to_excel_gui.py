@@ -44,7 +44,7 @@ from ai_enrich import (
     renumber_requirements,
 )
 from ai_providers import PROVIDERS, get_provider
-from router import QualityGateError, convert
+from router import QualityGateError, _standard_writer_kwargs, convert
 from standard_export import write_standard_assessment
 from web_extract import clean_url
 
@@ -890,8 +890,9 @@ class App(tk.Tk):
         elif self._export_items:
             export_items = self._export_items
         try:
+            kwargs = _standard_writer_kwargs(**meta)
             write_standard_assessment(
-                items, out, export_items=export_items, **meta,
+                items, out, export_items=export_items, **kwargs,
                 show_issues=bool(self.show_issues_var.get()),
             )
         except Exception as exc:  # noqa: BLE001
