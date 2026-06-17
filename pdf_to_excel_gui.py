@@ -882,7 +882,15 @@ class App(tk.Tk):
             return
         out = self.out_var.get().strip()
         meta = dict(self._meta)
-        meta.setdefault("standard_id", self.std_id_var.get().strip() or "MLSR")
+        writer_kwargs = _standard_writer_kwargs(
+            template_path=meta.get("template_path"),
+            standard_id=meta.get("standard_id") or self.std_id_var.get().strip() or "MLSR",
+            standard_title=meta.get("standard_title") or self.std_title_var.get().strip(),
+            standard_edition=meta.get("standard_edition") or self.std_edition_var.get().strip(),
+            document_id=meta.get("document_id") or self.doc_id_var.get().strip(),
+            document_name=meta.get("document_name") or self.doc_name_var.get().strip(),
+            document_revision=meta.get("document_revision") or self.doc_rev_var.get().strip(),
+        )
         # After AI enrichment, export all rows; otherwise only validated export rows.
         export_items = None
         if self._enriched and self._enriched != self._items:
@@ -890,9 +898,8 @@ class App(tk.Tk):
         elif self._export_items:
             export_items = self._export_items
         try:
-            kwargs = _standard_writer_kwargs(**meta)
             write_standard_assessment(
-                items, out, export_items=export_items, **kwargs,
+                items, out, export_items=export_items, **writer_kwargs,
                 show_issues=bool(self.show_issues_var.get()),
             )
         except Exception as exc:  # noqa: BLE001

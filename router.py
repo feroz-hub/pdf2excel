@@ -140,11 +140,11 @@ def _standard_writer_kwargs(
     document_id="",
     document_name="",
     document_revision="",
-    **kwargs
 ):
+    """Return only kwargs accepted by ``write_standard_assessment()``."""
     return {
-        "template_path": template_path,
-        "standard_id": standard_id,
+        "template_path": template_path or DEFAULT_TEMPLATE,
+        "standard_id": standard_id or "MLSR",
         "standard_title": standard_title,
         "standard_edition": standard_edition,
         "document_id": document_id,
