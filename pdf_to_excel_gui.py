@@ -712,17 +712,16 @@ class App(tk.Tk):
             skip_cover=bool(self.skip_cover_var.get()),
             raise_on_quality_gate=False,
         )
-        kwargs["_debug_labels"] = {
+        debug_labels = {
             "source": self.pdf_var.get().strip(),
             "output": out,
             "format_label": self.fmt_var.get(),
             "mode_label": self.mode_var.get(),
             "profile_label": self.profile_var.get(),
         }
-        return kwargs
+        return kwargs, debug_labels
 
-    def _log_extract_options(self, out: str, kwargs: dict) -> None:
-        labels = kwargs.pop("_debug_labels", {})
+    def _log_extract_options(self, out: str, kwargs: dict, labels: dict) -> None:
         lines = [
             "Extraction options:",
             f"  Source: {labels.get('source', '')}",
@@ -767,18 +766,20 @@ class App(tk.Tk):
         kwargs = self._collect_extract_kwargs()
         if kwargs is None:
             return
+        convert_kwargs, debug_labels = kwargs
 
         self._log_clear()
-        self._log_extract_options(out, dict(kwargs))
+        self._log_extract_options(out, convert_kwargs, debug_labels)
         self.extract_btn.config(state="disabled")
         self.extract_prog.start(12)
         self.extract_status.config(text="Extracting…")
-        threading.Thread(target=self._extract_worker, args=(src, out, kwargs),
+        threading.Thread(target=self._extract_worker, args=(src, out, convert_kwargs),
                          daemon=True).start()
 
     def _extract_worker(self, src, out, kwargs) -> None:
         try:
-            result = convert(src, out, **kwargs)
+            convert_kwargs = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+            result = convert(src, out, **convert_kwargs)
             self._events.put(("extract_done", result))
         except QualityGateError as exc:
             if exc.result is not None:
